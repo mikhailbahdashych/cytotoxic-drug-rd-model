@@ -1,0 +1,29 @@
+{
+  "base_params": {
+    "rho_S": 0.04,
+    "rho_R": 0.03,
+    "K": 1.0,
+    "alpha_S": 0.8,
+    "alpha_R": 0.12,
+    "sigma": 0.05,
+    "delta": 0.1,
+    "gamma_S": 0.02,
+    "gamma_R": 0.02,
+    "lam": 0.2,
+    "beta": 0.0,
+    "mu_max": 0.05,
+    "C50": 0.2,
+    "m_hill": 3,
+    "dose_type": "bolus_periodic",
+    "dose_A": 1.0,
+    "dose_period": 5.0,
+    "infusion_rate": 0.0
+  },
+  "base_metrics": {
+    "TB_final": 0.00877048172056657,
+    "TB_min": 0.00877048172056657,
+    "t_half": 1.6400000000000001,
+    "R_frac_final": 0.760439150011848,
+    "C_AUC": 3.68158792470277
+  }
+}
