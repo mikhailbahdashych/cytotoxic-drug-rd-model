@@ -25,6 +25,15 @@ except Exception as e:
     SCIPY_AVAILABLE = False
     print("Uwaga: SciPy niedostępne — solver pół-implicytny będzie wyłączony:", e)
 
+# Pillow do tworzenia GIF
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception as e:
+    PIL_AVAILABLE = False
+    print("Uwaga: Pillow niedostępny — animacje GIF nie będą tworzone:", e)
+    print("Aby zainstalować: pip install pillow")
+
 # Katalogi na wyniki
 Path("figs").mkdir(exist_ok=True)
 Path("out").mkdir(exist_ok=True)
@@ -318,7 +327,7 @@ def tumor_burden(S, R, grid: Grid):
     # Integralna masa guza ~ suma S+R * dx*dy
     return float(((S+R).sum()) * grid.dx * grid.dy)
 
-def run_simulation(solver_name, grid: Grid, p: Params, T=10.0, dt=None, save_every=10, theta=0.5):
+def run_simulation(solver_name, grid: Grid, p: Params, T=10.0, dt=None, save_every=10, theta=0.5, save_snapshots=False):
     S, R, I, C = init_fields(grid)
     if dt is None:
         if solver_name == "explicit":
@@ -335,6 +344,7 @@ def run_simulation(solver_name, grid: Grid, p: Params, T=10.0, dt=None, save_eve
     # Pomiar czasu
     t0 = walltime()
     traj = []
+    snapshots = [] if save_snapshots else None
     for n in range(steps):
         t_cur = n*dt
         if solver_name == "explicit":
@@ -350,6 +360,8 @@ def run_simulation(solver_name, grid: Grid, p: Params, T=10.0, dt=None, save_eve
             tb = tumor_burden(S, R, grid)
             traj.append({"step": n, "t": t_cur, "tumor_burden": tb,
                          "C_min": float(C.min()), "C_max": float(C.max())})
+            if save_snapshots:
+                snapshots.append({"t": t_cur, "S": S.copy(), "R": R.copy(), "I": I.copy(), "C": C.copy()})
     t1 = walltime()
 
     info = {
@@ -360,6 +372,8 @@ def run_simulation(solver_name, grid: Grid, p: Params, T=10.0, dt=None, save_eve
         "time_sec": t1 - t0,
         "params": asdict(p)
     }
+    if save_snapshots:
+        return (S, R, I, C), traj, info, snapshots
     return (S, R, I, C), traj, info
 
 def save_traj_csv(path, traj):
@@ -595,10 +609,19 @@ grid_cmp = Grid(Nx=96, Ny=96, Lx=1.0, Ly=1.0)
 def compare_solvers_once(grid, p, T=6.0):
     out = {}
     for solver in ["explicit"] + (["semi_implicit"] if SCIPY_AVAILABLE else []):
-        (S, R, I, C), traj, info = run_simulation(
-            solver_name=solver, grid=grid, p=p, T=T, dt=None, save_every=20, theta=0.5
+        # Dla explicit używamy większej wartości save_every, żeby mieć podobne odstępy czasowe jak semi_implicit
+        if solver == "explicit":
+            # Explicit ma mniejsze dt (~0.001), więc potrzebujemy większego save_every
+            save_every_val = 400  # Dostosuj tę wartość, aby uzyskać ~0.4s między klatkami
+        else:
+            # Semi_implicit ma dt~0.02, więc save_every=20 daje ~0.4s
+            save_every_val = 20
+            
+        result = run_simulation(
+            solver_name=solver, grid=grid, p=p, T=T, dt=None, save_every=save_every_val, theta=0.5, save_snapshots=True
         )
-        out[solver] = {"S":S, "R":R, "I":I, "C":C, "traj":traj, "info":info}
+        (S, R, I, C), traj, info, snapshots = result
+        out[solver] = {"S":S, "R":R, "I":I, "C":C, "traj":traj, "info":info, "snapshots":snapshots}
         base = f"out/compare_{solver}_N{grid.Nx}"
         save_traj_csv(base + "_traj.csv", traj)
         save_info_json(base + "_info.json", info)
@@ -606,14 +629,111 @@ def compare_solvers_once(grid, p, T=6.0):
         save_array(base + "_R_final", R)
         save_array(base + "_I_final", I)
         save_array(base + "_C_final", C)
-        for name, U in [("S",S), ("R",R), ("I",I), ("C",C)]:
-            plt.figure(figsize=(5.4,4.5))
-            plt.imshow(U.T, origin="lower", extent=[0,grid.Lx,0,grid.Ly], aspect="equal")
-            plt.colorbar(label=name)
-            plt.title(f"{name} — {solver} (t={info['T']:.2f})")
-            savefig(f"figs/compare_{solver}_{name}_final.png")
-            plt.show()
-            plt.close()
+
+        # Tworzenie GIF z animacją wszystkich pól w układzie 2x2
+        print(f"[Tworzenie GIF dla {solver}...]")
+        print(f"  Liczba klatek: {len(snapshots)}, dt={info['dt']:.6f}, save_every={save_every_val}")
+        try:
+            from PIL import Image
+            PIL_AVAILABLE = True
+        except:
+            PIL_AVAILABLE = False
+            print("  Uwaga: Pillow niedostępny — GIF nie zostanie utworzony")
+
+        if PIL_AVAILABLE:
+            frames = []
+            # Określenie zakresów kolorów dla spójności między klatkami
+            vmin_S, vmax_S = 0, max([s["S"].max() for s in snapshots])
+            vmin_R, vmax_R = 0, max([s["R"].max() for s in snapshots])
+            vmin_I, vmax_I = 0, max([s["I"].max() for s in snapshots])
+            vmin_C, vmax_C = 0, max([s["C"].max() for s in snapshots])
+            
+            for snap in snapshots:
+                fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+                fig.suptitle(f"{solver} — t={snap['t']:.2f}", fontsize=14, fontweight='bold')
+
+                # S (górny lewy)
+                im0 = axes[0,0].imshow(snap["S"].T, origin="lower", extent=[0,grid.Lx,0,grid.Ly],
+                                       aspect="equal", vmin=vmin_S, vmax=vmax_S, cmap='viridis')
+                axes[0,0].set_title("S (wrażliwe komórki)")
+                axes[0,0].set_xlabel("x")
+                axes[0,0].set_ylabel("y")
+                plt.colorbar(im0, ax=axes[0,0], fraction=0.046, pad=0.04)
+
+                # R (górny prawy)
+                im1 = axes[0,1].imshow(snap["R"].T, origin="lower", extent=[0,grid.Lx,0,grid.Ly],
+                                       aspect="equal", vmin=vmin_R, vmax=vmax_R, cmap='viridis')
+                axes[0,1].set_title("R (oporne komórki)")
+                axes[0,1].set_xlabel("x")
+                axes[0,1].set_ylabel("y")
+                plt.colorbar(im1, ax=axes[0,1], fraction=0.046, pad=0.04)
+
+                # I (dolny lewy)
+                im2 = axes[1,0].imshow(snap["I"].T, origin="lower", extent=[0,grid.Lx,0,grid.Ly],
+                                       aspect="equal", vmin=vmin_I, vmax=vmax_I, cmap='viridis')
+                axes[1,0].set_title("I (odpowiedź immunologiczna)")
+                axes[1,0].set_xlabel("x")
+                axes[1,0].set_ylabel("y")
+                plt.colorbar(im2, ax=axes[1,0], fraction=0.046, pad=0.04)
+
+                # C (dolny prawy)
+                im3 = axes[1,1].imshow(snap["C"].T, origin="lower", extent=[0,grid.Lx,0,grid.Ly],
+                                       aspect="equal", vmin=vmin_C, vmax=vmax_C, cmap='viridis')
+                axes[1,1].set_title("C (koncentracja leku)")
+                axes[1,1].set_xlabel("x")
+                axes[1,1].set_ylabel("y")
+                plt.colorbar(im3, ax=axes[1,1], fraction=0.046, pad=0.04)
+
+                plt.tight_layout()
+
+                # Zapisz klatkę do bufora (używamy buffer_rgba() zamiast tostring_rgb())
+                fig.canvas.draw()
+                # Konwersja bufora RGBA do RGB
+                buf = fig.canvas.buffer_rgba()
+                img = Image.frombuffer('RGBA', fig.canvas.get_width_height(), buf, 'raw', 'RGBA', 0, 1)
+                img = img.convert('RGB')
+                frames.append(img)
+                plt.close(fig)
+
+            # Zapisz GIF
+            gif_path = f"figs/compare_{solver}_animation.gif"
+            frames[0].save(gif_path, save_all=True, append_images=frames[1:],
+                          duration=200, loop=0)
+            print(f"[Zapisano animację] {gif_path}")
+
+        # Zapisz także końcowy obraz 2x2 jako statyczny PNG
+        fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+        fig.suptitle(f"{solver} — t={info['T']:.2f} (końcowy)", fontsize=14, fontweight='bold')
+
+        im0 = axes[0,0].imshow(S.T, origin="lower", extent=[0,grid.Lx,0,grid.Ly], aspect="equal", cmap='viridis')
+        axes[0,0].set_title("S (wrażliwe komórki)")
+        axes[0,0].set_xlabel("x")
+        axes[0,0].set_ylabel("y")
+        plt.colorbar(im0, ax=axes[0,0], fraction=0.046, pad=0.04)
+
+        im1 = axes[0,1].imshow(R.T, origin="lower", extent=[0,grid.Lx,0,grid.Ly], aspect="equal", cmap='viridis')
+        axes[0,1].set_title("R (oporne komórki)")
+        axes[0,1].set_xlabel("x")
+        axes[0,1].set_ylabel("y")
+        plt.colorbar(im1, ax=axes[0,1], fraction=0.046, pad=0.04)
+
+        im2 = axes[1,0].imshow(I.T, origin="lower", extent=[0,grid.Lx,0,grid.Ly], aspect="equal", cmap='viridis')
+        axes[1,0].set_title("I (odpowiedź immunologiczna)")
+        axes[1,0].set_xlabel("x")
+        axes[1,0].set_ylabel("y")
+        plt.colorbar(im2, ax=axes[1,0], fraction=0.046, pad=0.04)
+
+        im3 = axes[1,1].imshow(C.T, origin="lower", extent=[0,grid.Lx,0,grid.Ly], aspect="equal", cmap='viridis')
+        axes[1,1].set_title("C (koncentracja leku)")
+        axes[1,1].set_xlabel("x")
+        axes[1,1].set_ylabel("y")
+        plt.colorbar(im3, ax=axes[1,1], fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        savefig(f"figs/compare_{solver}_all_fields_final.png")
+        plt.show()
+        plt.close()
+
     return out
 
 comparison = compare_solvers_once(grid_cmp, p, T=6.0)
