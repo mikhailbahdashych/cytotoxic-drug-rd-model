@@ -1,6 +1,6 @@
 # %% [markdown]
 # # Zadanie 6 — PINN dla PDE (porównanie z PDE i ODE)
-#
+# 
 # Cel:
 # 1) Stworzyć fizycznie informowaną sieć (PINN) aproksymującą pola S(x,y,t), R(x,y,t), I(x,y,t), C(x,y,t).
 # 2) Trenować PINN na:
@@ -184,11 +184,16 @@ TB_pde = np.interp(t_eval, t_traj, TB_traj)
 S0_mat, R0_mat, I0_mat, C0_mat = init_fields(grid)
 print(f"[IC] Użyto init_fields() z modułu PDE. S0: [{S0_mat.min():.4e}, {S0_mat.max():.4e}], C0: [{C0_mat.min():.4e}, {C0_mat.max():.4e}]")
 
-# Losowania punktów treningowych
-n_phys   = 8000   # zwiększone dla lepszej kolokacji
-n_ic     = 2000
+# Losowania punktów treningowych - ZWIĘKSZONE dla lepszego pokrycia przestrzeni
+# POPRAWKA: Więcej punktów kolokacji wymusza lepszą zgodność z fizyką
+n_phys   = 15000  # gęstsza kolokacja PDE zapobiega jednolitym rozwiązaniom
+n_ic     = 4000   # silniejsze wymuszenie struktury początkowej
 n_bc     = 2000
-n_tb     = 150    # zmniejszone - TB jest globalne, nie potrzebujemy zbyt wielu punktów
+n_tb     = 120    # TB jest globalne, mniej punktów = mniejszy wpływ
+n_C      = 2000   # Punkty dla bezpośredniej supervizji pola C (łamie mode collapse C≈0)
+
+print(f"[Punkty treningowe] PDE:{n_phys}, IC:{n_ic}, BC:{n_bc}, TB:{n_tb}, C_field:{n_C}")
+print(f"  Stosunek PDE/TB = {n_phys/n_tb:.1f}× - priorytet dla fizyki!")
 
 xs = np.linspace(0,Lx,Nx_data); ys = np.linspace(0,Ly,Ny_data)
 
@@ -235,8 +240,39 @@ TB_tb = TB_pde[it_tb][:,None]
 pd.DataFrame({"t": t_eval, "TB_pde": TB_pde}).to_csv("out/pinn_tb_reference.csv", index=False)
 print("[Zapisano] out/pinn_tb_reference.csv")
 
+t_C = np.random.rand(n_C, 1) * T_end
+x_C, y_C = sample_uniform_xy(n_C)
+
+# Funkcja oczekiwanego profilu C(t) z harmonogramu dawkowania
+def expected_C_profile(t, dose_period, dose_A, lam):
+    """
+    Uproszczony profil C(t) oparty na harmonogramie dawkowania:
+    - Podczas bolusów: C ≈ dose_A (szczyt)
+    - Między bolusami: wykładniczy zanik C(t) = dose_A * exp(-lam * t_since_dose)
+
+    Uwaga: To uproszczenie (ignoruje dyfuzję przestrzenną), ale wystarczy
+    do złamania mode collapse C≈0.
+    """
+    t_in_period = t % dose_period
+    tau_bolus = 0.01 * dose_period  # Czas trwania bolusa (1% okresu)
+
+    # Podczas bolusa: wysoka koncentracja
+    if t_in_period < tau_bolus:
+        return dose_A
+    # Po bolusie: wykładniczy zanik
+    else:
+        time_since_bolus = t_in_period
+        return dose_A * np.exp(-lam * time_since_bolus)
+
+# Oblicz oczekiwane wartości C dla punktów kolokacji
+C_expected = np.array([
+    expected_C_profile(t_val[0], p_assim.dose_period, p_assim.dose_A, lam_assim)
+    for t_val in t_C
+]).reshape(-1, 1)
+
+print(f"[C field supervision] Oczekiwany zakres C: [{C_expected.min():.3f}, {C_expected.max():.3f}]")
+
 # %%
-# === Normalizacja wejść (POPRAWKA: tworzymy jako funkcję z ustalonymi parametrami) ===
 class InputNormalizer:
     def __init__(self, T_max, Lx, Ly):
         self.T_max = T_max
@@ -253,7 +289,6 @@ class InputNormalizer:
 normalizer = InputNormalizer(T_end, Lx, Ly)
 
 # Zgrubne skale wyjść zgodne z rzędem wielkości z Twoich symulacji PDE
-# POPRAWKA: dostosowane do rzeczywistych zakresów z IC
 OUT_SCALE = {
     "S": max(float(S0_mat.max()), 1e-4),
     "R": max(float(R0_mat.max()), 1e-4),
@@ -296,7 +331,7 @@ pinn = MLP().to(device)
 print(f"[Model] Parametry: {sum(p.numel() for p in pinn.parameters())/1e6:.3f}M")
 
 # %%
-# Parametry fizyczne → tensory
+# Parametry fizyczne -> tensory
 D_S = torch.tensor(float(p_assim.D_S), device=device)
 D_R = torch.tensor(float(p_assim.D_R), device=device)
 D_I = torch.tensor(float(p_assim.D_I), device=device)
@@ -368,8 +403,11 @@ nx_bc_t = to_t(nx_bc); ny_bc_t = to_t(ny_bc)
 t_tb_t  = to_t(t_tb)              # [n_tb,1]
 TB_tb_t = to_t(TB_tb)             # [n_tb,1]
 
+# Tensory dla supervizji pola C
+t_C_t = to_t(t_C); x_C_t = to_t(x_C); y_C_t = to_t(y_C)
+C_expected_t = to_t(C_expected)   # [n_C,1]
+
 # %%
-# === POPRAWKA KRYTYCZNA: TB(t) z gradientami ===
 def pinn_TB_batch(t_vec_1d: torch.Tensor) -> torch.Tensor:
     """
     POPRAWKA: Usuwa no_grad() i używa prawidłowej kwadratury
@@ -396,14 +434,32 @@ def pinn_TB_batch(t_vec_1d: torch.Tensor) -> torch.Tensor:
     return torch.stack(TB_list).unsqueeze(1)  # [M,1]
 
 # %%
-# Wagi strat (dostrojone)
-w_phys = 1.0
-w_ic   = 10.0   # zwiększone - IC jest kluczowy
+w_phys = 100.0
+w_ic   = 50.0
 w_bc   = 1.0
-w_tb   = 100.0  # mocno zwiększone - TB jest głównym sygnałem danych
+w_tb   = 10
+w_C    = 80
+
+# w_C = 80
+# w_Physics = 100
+# w_IC = 50
+# w_BC = 1
+# w_TB = 10
+
+print("\n" + "="*80)
+print("WAGI STRAT v3 - SUPERVIZJA POLA C")
+print("="*80)
+print(f"  w_C    = {w_C:6.1f}  ← Supervizja pola C (NAJWAŻNIEJSZE - łamie C≈0!)")
+print(f"  w_phys = {w_phys:6.1f}  ← Równania PDE (fizyka)")
+print(f"  w_ic   = {w_ic:6.1f}  ← Warunki początkowe (struktura)")
+print(f"  w_tb   = {w_tb:6.1f}  ← Dopasowanie TB (słabe)")
+print(f"  w_bc   = {w_bc:6.1f}  ← Warunki brzegowe")
+print(f"\n  Stosunek C/TB = {w_C/w_tb:.0f}× - pole C ma priorytet!")
+print(f"  Stosunek (C+Physics)/TB = {(w_C+w_phys)/w_tb:.0f}× - fizyka+C dominują!")
+print("="*80 + "\n")
 
 optimizer = optim.Adam(pinn.parameters(), lr=1e-3)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=200, verbose=True)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=300)
 
 def bc_penalty(t, x, y, nx, ny):
     """Warunki brzegowe Neumanna (zero-flux)"""
@@ -432,17 +488,31 @@ def tb_penalty():
     TB_pred = pinn_TB_batch(t_tb_t)  # [n_tb,1]
     return ((TB_pred - TB_tb_t)**2).mean()
 
+def c_field_penalty():
+    """
+    NOWA STRATA: Bezpośrednia supervizja pola C(x,y,t)
+    Wymusza, aby C(t) śledzilo oczekiwany profil z dawkowania.
+    To ŁAMIE mode collapse C≈0!
+    """
+    _, _, _, C_pred = pinn(t_C_t, x_C_t, y_C_t)  # [n_C, 1]
+    return ((C_pred - C_expected_t)**2).mean()
+
 # %%
 # Trening
 history = []
-epochs = 3000
+epochs = 4000
 t0 = time.time()
 
-print("[Trening] Rozpoczynam...")
+print("\n" + "="*70)
+print("ROZPOCZĘCIE TRENINGU PINN")
+print("="*70)
+print(f"  Epoki: {epochs}")
 print(f"  Kolokacja PDE: {n_phys} punktów")
 print(f"  IC: {n_ic} punktów")
 print(f"  BC: {n_bc} punktów")
 print(f"  TB: {n_tb} punktów czasowych")
+print(f"  Device: {device}")
+print("="*70 + "\n")
 
 for ep in range(1, epochs+1):
     pinn.train()
@@ -454,9 +524,10 @@ for ep in range(1, epochs+1):
     L_ic   = ic_penalty()
     L_bc   = bc_penalty(t_bc_t, x_bc_t, y_bc_t, nx_bc_t, ny_bc_t)
     L_tb   = tb_penalty()
+    L_C    = c_field_penalty()
 
     # Łączna strata
-    loss = w_phys*L_phys + w_ic*L_ic + w_bc*L_bc + w_tb*L_tb
+    loss = w_phys*L_phys + w_ic*L_ic + w_bc*L_bc + w_tb*L_tb + w_C*L_C
 
     loss.backward()
     optimizer.step()
@@ -464,6 +535,13 @@ for ep in range(1, epochs+1):
 
     if ep % 100 == 0 or ep == 1:
         elapsed = time.time()-t0
+        # Oblicz wkłady ważone do całkowitej straty
+        contrib_phys = float(w_phys * L_phys.item())
+        contrib_ic = float(w_ic * L_ic.item())
+        contrib_bc = float(w_bc * L_bc.item())
+        contrib_tb = float(w_tb * L_tb.item())
+        contrib_C = float(w_C * L_C.item())
+
         history.append({
             "ep":ep,
             "L":float(loss.item()),
@@ -471,37 +549,118 @@ for ep in range(1, epochs+1):
             "L_ic":float(L_ic.item()),
             "L_bc":float(L_bc.item()),
             "L_tb":float(L_tb.item()),
+            "L_C":float(L_C.item()),
+            "contrib_phys": contrib_phys,
+            "contrib_ic": contrib_ic,
+            "contrib_bc": contrib_bc,
+            "contrib_tb": contrib_tb,
+            "contrib_C": contrib_C,
             "time":elapsed
         })
-        print(f"[{ep:5d}] L={loss.item():.3e}  phys={L_phys.item():.3e}  ic={L_ic.item():.3e}  bc={L_bc.item():.3e}  tb={L_tb.item():.3e}  time={elapsed:.1f}s")
 
-print(f"[Trening] Zakończono w {time.time()-t0:.1f}s")
+        # Wyświetl zarówno nieważone straty jak i wkłady
+        print(f"[{ep:5d}] L={loss.item():.3e}  phys={L_phys.item():.3e}  ic={L_ic.item():.3e}  bc={L_bc.item():.3e}  tb={L_tb.item():.3e}  C={L_C.item():.3e}  time={elapsed:.1f}s")
+        if ep % 500 == 0:
+            # Co 500 epok pokazuj wkłady ważone
+            print(f"         Wkłady → C:{contrib_C:.2e} phys:{contrib_phys:.2e} ic:{contrib_ic:.2e} tb:{contrib_tb:.2e} bc:{contrib_bc:.2e}")
+
+total_time = time.time()-t0
+print("\n" + "="*70)
+print(f"[Trening] Zakończono w {total_time:.1f}s ({total_time/60:.1f} min)")
+print("="*70 + "\n")
 
 pd.DataFrame(history).to_csv("out/pinn_training_history.csv", index=False)
 torch.save(pinn.state_dict(), "out/pinn_model.pt")
 print("[Zapisano] out/pinn_training_history.csv")
 print("[Zapisano] out/pinn_model.pt")
 
-# Wykres historii treningu
-plt.figure(figsize=(10,6))
+# Analiza końcowych wkładów
+last_hist = history[-1]
+print(f"\n[Końcowe wkłady do straty]")
+print(f"  C field: {last_hist['contrib_C']:.3e} ({100*last_hist['contrib_C']/last_hist['L']:.1f}%)")
+print(f"  Physics: {last_hist['contrib_phys']:.3e} ({100*last_hist['contrib_phys']/last_hist['L']:.1f}%)")
+print(f"  IC:      {last_hist['contrib_ic']:.3e} ({100*last_hist['contrib_ic']/last_hist['L']:.1f}%)")
+print(f"  TB:      {last_hist['contrib_tb']:.3e} ({100*last_hist['contrib_tb']/last_hist['L']:.1f}%)")
+print(f"  BC:      {last_hist['contrib_bc']:.3e} ({100*last_hist['contrib_bc']/last_hist['L']:.1f}%)")
+
+# Wykres historii treningu (rozszerzony)
+fig = plt.figure(figsize=(14, 10))
 df_hist = pd.DataFrame(history)
-plt.subplot(2,1,1)
-plt.plot(df_hist["ep"], df_hist["L"], label="Total Loss")
+
+# Górny panel: Całkowita strata
+plt.subplot(3, 2, 1)
+plt.plot(df_hist["ep"], df_hist["L"], 'k-', linewidth=2)
 plt.yscale('log')
-plt.ylabel("Loss")
-plt.legend()
+plt.ylabel("Całkowita Strata", fontsize=11)
+plt.title("Total Loss", fontsize=12, fontweight='bold')
 plt.grid(True, alpha=0.3)
 
-plt.subplot(2,1,2)
-plt.plot(df_hist["ep"], df_hist["L_phys"], label="Physics")
-plt.plot(df_hist["ep"], df_hist["L_ic"], label="IC")
-plt.plot(df_hist["ep"], df_hist["L_bc"], label="BC")
-plt.plot(df_hist["ep"], df_hist["L_tb"], label="TB")
+# Nieważone straty składowe
+plt.subplot(3, 2, 2)
+plt.plot(df_hist["ep"], df_hist["L_C"], label="C field", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["L_phys"], label="Physics", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["L_ic"], label="IC", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["L_bc"], label="BC", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["L_tb"], label="TB", linewidth=2)
 plt.yscale('log')
-plt.xlabel("Epoka")
-plt.ylabel("Loss")
-plt.legend()
+plt.ylabel("Nieważone Straty", fontsize=11)
+plt.title("Straty Składowe (nieważone)", fontsize=12, fontweight='bold')
+plt.legend(fontsize=9)
 plt.grid(True, alpha=0.3)
+
+# Ważone wkłady (pokazuje co faktycznie wpływa na optymalizację)
+plt.subplot(3, 2, 3)
+plt.plot(df_hist["ep"], df_hist["contrib_C"], label=f"C field (w={w_C})", linewidth=2, color='purple')
+plt.plot(df_hist["ep"], df_hist["contrib_phys"], label=f"Physics (w={w_phys})", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["contrib_ic"], label=f"IC (w={w_ic})", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["contrib_tb"], label=f"TB (w={w_tb})", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["contrib_bc"], label=f"BC (w={w_bc})", linewidth=2)
+plt.yscale('log')
+plt.ylabel("Ważone Wkłady", fontsize=11)
+plt.title("Wkłady do Gradientu (ważone)", fontsize=12, fontweight='bold')
+plt.legend(fontsize=8, loc='best')
+plt.grid(True, alpha=0.3)
+
+# Proporcje wkładów
+plt.subplot(3, 2, 4)
+for idx, row in df_hist.iterrows():
+    total = row['contrib_C'] + row['contrib_phys'] + row['contrib_ic'] + row['contrib_tb'] + row['contrib_bc']
+    if idx % 5 == 0:  # Co 5 punktów dla czytelności
+        plt.scatter(row['ep'], 100*row['contrib_C']/total, c='purple', s=10, alpha=0.5)
+        plt.scatter(row['ep'], 100*row['contrib_phys']/total, c='C0', s=10, alpha=0.5)
+        plt.scatter(row['ep'], 100*row['contrib_ic']/total, c='C1', s=10, alpha=0.5)
+        plt.scatter(row['ep'], 100*row['contrib_tb']/total, c='C2', s=10, alpha=0.5)
+plt.ylabel("% Wkładu", fontsize=11)
+plt.title("Proporcje Wkładów (%)", fontsize=12, fontweight='bold')
+plt.ylim(0, 100)
+plt.grid(True, alpha=0.3)
+plt.legend(['C field', 'Physics', 'IC', 'TB'], fontsize=8)
+
+# C field vs TB (kluczowe porównanie - C musi dominować!)
+plt.subplot(3, 2, 5)
+plt.plot(df_hist["ep"], df_hist["L_C"], color='purple', label="C field (nieważone)", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["L_phys"], 'b-', label="Physics (nieważone)", linewidth=2)
+plt.plot(df_hist["ep"], df_hist["L_tb"], 'r-', label="TB (nieważone)", linewidth=2)
+plt.yscale('log')
+plt.xlabel("Epoka", fontsize=11)
+plt.ylabel("Loss", fontsize=11)
+plt.title("C field vs Physics vs TB Loss", fontsize=12, fontweight='bold')
+plt.legend(fontsize=9)
+plt.grid(True, alpha=0.3)
+
+# Stosunek C/TB (powinien być >> 1 by łamać mode collapse)
+plt.subplot(3, 2, 6)
+ratio = df_hist["contrib_C"] / (df_hist["contrib_tb"] + 1e-12)
+plt.plot(df_hist["ep"], ratio, color='purple', linewidth=2)
+plt.axhline(y=1.0, color='r', linestyle='--', label='Równowaga', linewidth=1.5)
+plt.axhline(y=w_C/w_tb, color='g', linestyle=':', label=f'Target ({w_C/w_tb:.0f}×)', linewidth=1.5)
+plt.xlabel("Epoka", fontsize=11)
+plt.ylabel("Stosunek C/TB", fontsize=11)
+plt.title("Dominacja C field nad TB", fontsize=12, fontweight='bold')
+plt.legend(fontsize=9)
+plt.grid(True, alpha=0.3)
+plt.yscale('log')
+
 plt.tight_layout()
 savefig_fig("figs/pinn_training_loss.png")
 plt.show()
@@ -567,13 +726,21 @@ plt.tight_layout()
 savefig_fig("figs/pinn_tb_compare.png")
 plt.show()
 
-print("\n[Metryki]")
+print("\n" + "="*70)
+print("METRYKI TB(t)")
+print("="*70)
 print(f"  RMSE(PINN vs PDE) = {metrics['rmse_pinn_vs_pde']:.6f}")
 print(f"  RMSE(ODE  vs PDE) = {metrics['rmse_ode_vs_pde']:.6f}")
 print(f"  RMSE(PINN vs ODE) = {metrics['rmse_pinn_vs_ode']:.6f}")
-print(f"  MAE(PINN vs PDE)  = {metrics['mae_pinn_vs_pde']:.6f}")
+print(f"\n  MAE(PINN vs PDE)  = {metrics['mae_pinn_vs_pde']:.6f}")
 print(f"  MAE(ODE  vs PDE)  = {metrics['mae_ode_vs_pde']:.6f}")
 print(f"  MAE(PINN vs ODE)  = {metrics['mae_pinn_vs_ode']:.6f}")
+
+# Porównanie z ODE
+improvement = (metrics['rmse_ode_vs_pde'] - metrics['rmse_pinn_vs_pde']) / metrics['rmse_ode_vs_pde'] * 100
+print(f"\n  PINN jest o {improvement:.1f}% lepszy od ODE (RMSE)")
+print("="*70 + "\n")
+
 print("[Zapisano] out/pinn_tb_curves.csv, out/pinn_metrics.json, figs/pinn_tb_compare.png")
 
 # %%
@@ -628,7 +795,6 @@ def save_compare_field(Z_pde, Z_pinn, name):
     fig.colorbar(im1, ax=axs[:2].ravel().tolist(), shrink=0.8, label=name)
     fig.colorbar(im2, ax=axs[2], shrink=0.8, label="Różnica")
 
-    plt.tight_layout()
     fname = f"figs/pinn_vs_pde_field_{name}.png"
     plt.savefig(fname, dpi=160, bbox_inches="tight")
     plt.show()
@@ -638,7 +804,9 @@ def save_compare_field(Z_pde, Z_pinn, name):
     rmse_field = np.sqrt(np.mean((Z_pinn - Z_pde)**2))
     mae_field = np.mean(np.abs(Z_pinn - Z_pde))
     max_err = np.max(np.abs(Z_pinn - Z_pde))
-    print(f"  {name}: RMSE={rmse_field:.4e}, MAE={mae_field:.4e}, MAX_ERR={max_err:.4e}")
+    rel_rmse = rmse_field / (Z_pde.max() + 1e-10)  # Względny błąd
+
+    print(f"  {name}: RMSE={rmse_field:.4e}, MAE={mae_field:.4e}, MAX_ERR={max_err:.4e}, REL_RMSE={rel_rmse:.2%}")
 
 # Porównania
 save_compare_field(S_end, Sg, "S")
@@ -650,42 +818,4 @@ save_compare_field(C_end, Cg, "C")
 np.savez("out/pinn_final_fields.npz", S=Sg, R=Rg, I=Ig, C=Cg)
 print("[Zapisano] out/pinn_final_fields.npz")
 
-# %%
-# Podsumowanie końcowe
-print("\n" + "="*60)
-print("PODSUMOWANIE ZADANIA 6 — PINN")
-print("="*60)
-print(f"\nParametry po asymilacji (źródło: {src}):")
-print(f"  alpha_S = {alpha_S_assim:.4f}")
-print(f"  mu_max  = {mu_max_assim:.4f}")
-print(f"  lam     = {lam_assim:.4f}")
 
-print(f"\nArchitektura PINN:")
-print(f"  Szerokość: 128, Głębokość: 6")
-print(f"  Parametry: {sum(p.numel() for p in pinn.parameters())/1e6:.3f}M")
-print(f"  Device: {device}")
-
-print(f"\nTrening:")
-print(f"  Epoki: {epochs}")
-print(f"  Czas: {history[-1]['time']:.1f}s")
-print(f"  Końcowa strata: {history[-1]['L']:.3e}")
-
-print(f"\nMetryki TB(t):")
-print(f"  RMSE(PINN, PDE) = {metrics['rmse_pinn_vs_pde']:.6f}")
-print(f"  RMSE(ODE,  PDE) = {metrics['rmse_ode_vs_pde']:.6f}")
-print(f"  MAE(PINN,  PDE) = {metrics['mae_pinn_vs_pde']:.6f}")
-print(f"  MAE(ODE,   PDE) = {metrics['mae_ode_vs_pde']:.6f}")
-
-print(f"\nPliki wyjściowe:")
-print(f"  - out/pinn_model.pt (wagi sieci)")
-print(f"  - out/pinn_training_history.csv (historia treningu)")
-print(f"  - out/pinn_tb_curves.csv (trajektorie TB)")
-print(f"  - out/pinn_metrics.json (metryki)")
-print(f"  - out/pinn_final_fields.npz (pola końcowe)")
-print(f"  - figs/pinn_tb_compare.png (porównanie TB)")
-print(f"  - figs/pinn_vs_pde_field_*.png (porównania pól)")
-print(f"  - figs/pinn_training_loss.png (krzywe uczenia)")
-
-print("\n" + "="*60)
-print("Zadanie 6 zakończone pomyślnie!")
-print("="*60)
