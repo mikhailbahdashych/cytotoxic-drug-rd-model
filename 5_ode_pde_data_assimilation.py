@@ -118,7 +118,7 @@ PDE_OK = True
 try:
     import importlib.util, sys
     candidates = [
-        "tumor_diffusion_pde_analysis.py"
+        "2_tumor_diffusion_pde_analysis.py"
     ]
     mod = None
     for cand in candidates:
