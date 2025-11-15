@@ -243,15 +243,21 @@ def simulate_ode(p: ODEParams, y0, t_grid):
 # TODO: Dostosuj do swoich istniejących danych lub użyj symulacji PDE.
 
 # %%
-def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit"):
+def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit", high_resolution=True):
     """
     Wczytuje lub generuje trajektorię TB(t) z PDE.
 
-    TODO: Jeśli masz zapisane dane z wcześniejszych zadań (np. po asymilacji),
-    wczytaj je tutaj. W przeciwnym razie uruchom symulację PDE.
-
     Zwraca: dict {"t": array, "TB": array, "S_final": array, "R_final": array, ...}
     """
+    # Próba wczytania z istniejącego pliku o wysokiej rozdzielczości
+    if high_resolution:
+        high_res_file = "out/supermodel_pde_reference_highres.csv"
+        if Path(high_res_file).exists():
+            df = pd.read_csv(high_res_file)
+            if "t" in df.columns and "tumor_burden" in df.columns:
+                print(f"[OK] Wczytano wysokorozdzielcze dane PDE z: {high_res_file}")
+                return {"t": df["t"].values, "TB": df["tumor_burden"].values}
+
     # Próba wczytania z istniejącego pliku
     possible_files = [
         "out/pinn_reference_pde.csv",
@@ -270,24 +276,30 @@ def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit"):
                 print(f"[OK] Wczytano PDE z: {fname}")
                 return {"t": df["t"].values, "TB": df["TB_explicit"].values}
 
-    # Jeśli nie znaleziono, wygeneruj nową symulację
+    # Jeśli nie znaleziono, wygeneruj nową symulację o wysokiej rozdzielczości
     if PDE_OK:
-        print("[INFO] Generuję nową symulację PDE...")
+        print("[INFO] Generuję nową symulację PDE o wysokiej rozdzielczości...")
         grid = Grid(Nx=N, Ny=N)
         p = copy.deepcopy(p_pde_base)
         p.dose_type = "infusion_const"
         p.infusion_rate = 0.15
 
         dt = 0.01
+        save_interval = 10 if high_resolution else 50
 
-        (S_final, R_final, I_final, C_final), traj, info = run_simulation(solver, grid, p, T=T, dt=dt, save_every=50)
+        (S_final, R_final, I_final, C_final), traj, info = run_simulation(
+            solver, grid, p, T=T, dt=dt, save_every=save_interval
+        )
 
         t_arr = np.array([rec["t"] for rec in traj])
         TB_arr = np.array([rec["tumor_burden"] for rec in traj])
 
+        print(f"[INFO] Wygenerowano {len(t_arr)} punktów czasowych (T={T}, dt={dt}, save_every={save_interval})")
+
         # Zapisz do pliku
+        fname = "supermodel_pde_reference_highres.csv" if high_resolution else "supermodel_pde_reference.csv"
         df_ref = pd.DataFrame({"t": t_arr, "tumor_burden": TB_arr})
-        save_csv(df_ref, "supermodel_pde_reference.csv")
+        save_csv(df_ref, fname)
 
         return {
             "t": t_arr,
@@ -326,8 +338,27 @@ else:
     p_ode = ODEParams()
     print("[INFO] Używam domyślnych parametrów ODE")
 
-# Warunki początkowe ODE
-y0_ode = np.array([0.8, 0.2, 0.0, 0.0])  # [S, R, I, C]
+# Warunki początkowe ODE - dopasowane do PDE!
+# POPRAWKA: użyj średniej przestrzennej z PDE zamiast arbitralnych wartości
+if PDE_OK:
+    # Generuj te same warunki początkowe co PDE
+    grid_ic = Grid(Nx=64, Ny=64)
+    S0_pde, R0_pde, I0_pde, C0_pde = init_fields(grid_ic)
+
+    # ODE powinno reprezentować średnią przestrzenną (spatially-averaged model)
+    y0_ode = np.array([
+        np.mean(S0_pde),
+        np.mean(R0_pde),
+        np.mean(I0_pde),
+        np.mean(C0_pde)
+    ])
+    print(f"[INFO] Dopasowano IC ODE do PDE: S0={y0_ode[0]:.4f}, R0={y0_ode[1]:.4f}, "
+          f"I0={y0_ode[2]:.4f}, C0={y0_ode[3]:.4f}")
+    print(f"       TB_ODE(0) = {y0_ode[0] + y0_ode[1]:.4f} vs TB_PDE(0) = {TB_pde[0]:.4f}")
+else:
+    # Fallback jeśli PDE niedostępny
+    y0_ode = np.array([0.8, 0.2, 0.0, 0.0])
+    print("[WARNING] Brak modułu PDE - używam arbitralnych IC dla ODE")
 
 # Symulacja ODE
 ode_traj = simulate_ode(p_ode, y0_ode, t_pde)
@@ -336,6 +367,51 @@ TB_ode = ode_traj["TB"]
 print(f"[OK] Symulacja ODE zakończona")
 print(f"     RMSE(ODE vs PDE): {rmse(TB_ode, TB_pde):.6f}")
 print(f"     MAE(ODE vs PDE):  {mae(TB_ode, TB_pde):.6f}")
+
+if SCIPY_AVAILABLE and rmse(TB_ode, TB_pde) > 0.1:
+    print("\n[INFO] RMSE > 0.1 - uruchamiam automatyczną kalibrację parametrów ODE...")
+
+    from scipy.optimize import minimize
+
+    # Parametry do optymalizacji (najważniejsze dla dynamiki TB)
+    param_names = ["alpha_S", "lam", "mu_max"]
+    p0 = [p_ode.alpha_S, p_ode.lam, p_ode.mu_max]
+    bounds = [(0.3, 1.5), (0.05, 0.5), (0.0, 0.15)]  # sensowne zakresy
+
+    def objective(params):
+        p_test = copy.deepcopy(p_ode)
+        p_test.alpha_S = params[0]
+        p_test.lam = params[1]
+        p_test.mu_max = params[2]
+        try:
+            traj_test = simulate_ode(p_test, y0_ode, t_pde)
+            return rmse(traj_test["TB"], TB_pde)
+        except:
+            return 1e6
+
+    print(f"  Optymalizacja: {param_names}")
+    print(f"  Początkowe: alpha_S={p0[0]:.3f}, lam={p0[1]:.3f}, mu_max={p0[2]:.3f}")
+
+    result = minimize(objective, p0, bounds=bounds, method='L-BFGS-B',
+                     options={'maxiter': 50, 'ftol': 1e-6})
+
+    if result.success:
+        p_ode.alpha_S = result.x[0]
+        p_ode.lam = result.x[1]
+        p_ode.mu_max = result.x[2]
+
+        print(f"  Skalibrowane: alpha_S={result.x[0]:.3f}, lam={result.x[1]:.3f}, mu_max={result.x[2]:.3f}")
+        print(f"  RMSE: {result.fun:.6f} (poprzednio: {rmse(TB_ode, TB_pde):.6f})")
+
+        # Przeliczy trajektorię ze skalibrowanymi parametrami
+        ode_traj = simulate_ode(p_ode, y0_ode, t_pde)
+        TB_ode = ode_traj["TB"]
+
+        print(f"[OK] Kalibracja ODE zakończona sukcesem!")
+    else:
+        print(f"[WARNING] Kalibracja nie powiodła się: {result.message}")
+else:
+    print("[INFO] ODE baseline wystarczająco dobry - pomijam kalibrację")
 
 # %% [markdown]
 # ## 5. SUPERMODEL — Definicja
@@ -748,8 +824,7 @@ def generate_pde_data_for_dose(p_dose, T=6.0, N=64, base_infusion=0.15):
     p.infusion_rate = base_infusion * p_dose
 
     dt = 0.01
-
-    (S_final, R_final, I_final, C_final), traj, info = run_simulation("semi_implicit", grid, p, T=T, dt=dt, save_every=50)
+    (S_final, R_final, I_final, C_final), traj, info = run_simulation("semi_implicit", grid, p, T=T, dt=dt, save_every=10)
 
     t_arr = np.array([rec["t"] for rec in traj])
     TB_arr = np.array([rec["tumor_burden"] for rec in traj])
@@ -1079,10 +1154,12 @@ def train_supernet(supernet, training_data, pde_params, epochs=5000, lr=1e-3,
         loss_tb = torch.mean((TB_pred_tensor - TB_true_tensor)**2)
 
         # === Łączna strata ===
-        # Wagi dla różnych komponentów (do dostrojenia)
-        w_pde = 1.0
-        w_ic = 10.0
-        w_tb = 100.0
+        # TB trajectory jest najważniejszy (to chcemy dopasować)
+        # IC musi być silnie wymuszony (poprawny start)
+        # PDE residuals dla regularyzacji fizycznej
+        w_pde = 0.1      # Zmniejszony - fizyka jako regularyzacja, nie główny cel
+        w_ic = 50.0      # Zwiększony z 10.0 - krytyczne dla poprawnego startu
+        w_tb = 500.0     # Zwiększony z 100.0 - główny cel: dopasowanie TB(t)
 
         loss = w_pde * loss_pde + w_ic * loss_ic + w_tb * loss_tb
 
@@ -1120,16 +1197,22 @@ supernet = SuperNet(in_dim=4, out_dim=4, width=128, depth=6)
 print(f"\n[SuperNet] Parametry sieci: {sum(p.numel() for p in supernet.parameters())/1e6:.2f}M")
 
 # Trenowanie (uwaga: może być czasochłonne)
-# W produkcji użyj większej liczby epok
 if PDE_OK:
     supernet, supernet_losses = train_supernet(
         supernet, training_data, p_pde_base,
-        epochs=2000, lr=1e-3, batch_size=512, device=device
+        epochs=5000,      # Zwiększone z 2000 - więcej czasu na naukę
+        lr=5e-4,          # Zmniejszone z 1e-3 - bardziej stabilne dla dłuższego treningu
+        batch_size=512,
+        device=device
     )
 
-    # Zapisz model
+    # Zapisz model i historię treningu
     torch.save(supernet.state_dict(), "out/supernet_model.pt")
     print("[OK] Model SuperNet zapisany do out/supernet_model.pt")
+
+    # Zapisz historię strat
+    loss_df = pd.DataFrame({"epoch": range(len(supernet_losses)), "loss": supernet_losses})
+    save_csv(loss_df, "supernet_training_history.csv")
 else:
     print("[UWAGA] SuperNet nie został wytrenowany - brak modułu PDE")
 
@@ -1222,7 +1305,7 @@ if PDE_OK:
         plt.legend(fontsize=10)
         plt.grid(alpha=0.3)
 
-        fname = f"out/supermodel_supernet_tb_dose{str(p_dose).replace('.', '')}.png"
+        fname = f"figs/supermodel_supernet_tb_dose{str(p_dose).replace('.', '')}.png"
         savefig_root(fname)
         plt.show()
 
@@ -1271,6 +1354,48 @@ if "Supermodel_vs_PDE" in metrics_supermodel:
     print(f"  Supermodel vs PDE: RMSE={metrics_supermodel['Supermodel_vs_PDE']['RMSE']:.6f}")
 if PDE_OK and "dose_1.0" in supernet_metrics:
     print(f"  SuperNet vs PDE:   RMSE={supernet_metrics['dose_1.0']['SuperNet_vs_PDE']['RMSE']:.6f}")
+
+if PDE_OK:
+    print("\n[INFO] Generuję panel porównawczy wszystkich modeli...")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    for idx, p_dose in enumerate(dose_scenarios):
+        ax = axes[idx]
+
+        t_ref = pde_data_scenarios[p_dose]["t"]
+        TB_pde_ref = pde_data_scenarios[p_dose]["TB"]
+
+        # Odtwórz wszystkie trajektorie
+        p_ode_scaled = copy.deepcopy(p_ode)
+        p_ode_scaled.infusion_rate = 0.15 * p_dose
+        ode_traj_scaled = simulate_ode(p_ode_scaled, y0_ode, t_ref)
+        TB_ode_scaled = ode_traj_scaled["TB"]
+
+        integrator_scaled = SupermodelIntegrator(p_ode_scaled, correction_net, device=device, method="rk4")
+        traj_sm_scaled = integrator_scaled.integrate(y0_ode, t_ref)
+        TB_supermodel_scaled = traj_sm_scaled[:, 0] + traj_sm_scaled[:, 1]
+
+        TB_supernet = evaluate_supernet_scenario(supernet, grid_eval, t_ref, p_dose, device)
+
+        # Plot
+        ax.plot(t_ref, TB_pde_ref, 'k-', lw=2.5, label="PDE (reference)", alpha=0.9)
+        ax.plot(t_ref, TB_ode_scaled, 'b--', lw=2, label=f"ODE (RMSE={rmse(TB_ode_scaled, TB_pde_ref):.3f})")
+        ax.plot(t_ref, TB_supermodel_scaled, 'g:', lw=2.5, label=f"Supermodel (RMSE={rmse(TB_supermodel_scaled, TB_pde_ref):.3f})")
+        ax.plot(t_ref, TB_supernet, 'r-.', lw=2, label=f"SuperNet (RMSE={rmse(TB_supernet, TB_pde_ref):.3f})")
+
+        ax.set_xlabel("Czas t", fontsize=11)
+        ax.set_ylabel("Tumor Burden TB(t)", fontsize=11)
+        ax.set_title(f"Dawka p = {p_dose}", fontsize=12, fontweight='bold')
+        ax.legend(fontsize=9)
+        ax.grid(alpha=0.3)
+
+    plt.suptitle("Porównanie wszystkich modeli dla różnych scenariuszy dawkowania", fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    savefig_fig("supermodel_tb_compare.png")
+    plt.show()
+
+    print("[OK] Panel porównawczy zapisany do figs/supermodel_tb_compare.png")
 
 print("\n" + "="*70)
 print("Zadanie 7 zakończone!")
