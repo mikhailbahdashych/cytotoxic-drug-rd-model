@@ -525,8 +525,7 @@ def train_supermodel(correction_net, p_ode, y0, t_target, TB_target,
     """
     correction_net = correction_net.to(device)
     optimizer = optim.Adam(correction_net.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
-                                                     factor=0.5, patience=200, verbose=False)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=200)
 
     integrator = SupermodelIntegrator(p_ode, correction_net, device=device, method="rk4")
 
