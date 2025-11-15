@@ -280,10 +280,10 @@ def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit"):
 
         dt = 0.01
 
-        result = run_simulation(solver, grid, p, T=T, dt=dt, save_every=50)
+        (S_final, R_final, I_final, C_final), traj, info = run_simulation(solver, grid, p, T=T, dt=dt, save_every=50)
 
-        t_arr = np.array([rec["t"] for rec in result["trajectory"]])
-        TB_arr = np.array([rec["tumor_burden"] for rec in result["trajectory"]])
+        t_arr = np.array([rec["t"] for rec in traj])
+        TB_arr = np.array([rec["tumor_burden"] for rec in traj])
 
         # Zapisz do pliku
         df_ref = pd.DataFrame({"t": t_arr, "tumor_burden": TB_arr})
@@ -292,10 +292,10 @@ def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit"):
         return {
             "t": t_arr,
             "TB": TB_arr,
-            "S_final": result["S"],
-            "R_final": result["R"],
-            "I_final": result["I"],
-            "C_final": result["C"]
+            "S_final": S_final,
+            "R_final": R_final,
+            "I_final": I_final,
+            "C_final": C_final
         }
     else:
         raise RuntimeError("Nie można wczytać ani wygenerować danych PDE")
@@ -749,10 +749,10 @@ def generate_pde_data_for_dose(p_dose, T=6.0, N=64, base_infusion=0.15):
 
     dt = 0.01
 
-    result = run_simulation("semi_implicit", grid, p, T=T, dt=dt, save_every=50)
+    (S_final, R_final, I_final, C_final), traj, info = run_simulation("semi_implicit", grid, p, T=T, dt=dt, save_every=50)
 
-    t_arr = np.array([rec["t"] for rec in result["trajectory"]])
-    TB_arr = np.array([rec["tumor_burden"] for rec in result["trajectory"]])
+    t_arr = np.array([rec["t"] for rec in traj])
+    TB_arr = np.array([rec["tumor_burden"] for rec in traj])
 
     # Snapshoty w wybranych czasach (np. t=2, 4, 6)
     snapshot_times = [2.0, 4.0, 6.0]
@@ -767,10 +767,10 @@ def generate_pde_data_for_dose(p_dose, T=6.0, N=64, base_infusion=0.15):
         if abs(t_arr[idx] - T) < 0.1:
             snapshots.append({
                 "t": T,
-                "S": result["S"].copy(),
-                "R": result["R"].copy(),
-                "I": result["I"].copy(),
-                "C": result["C"].copy()
+                "S": S_final.copy(),
+                "R": R_final.copy(),
+                "I": I_final.copy(),
+                "C": C_final.copy()
             })
 
     return {
