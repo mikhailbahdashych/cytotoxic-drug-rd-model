@@ -654,7 +654,7 @@ plt.ylabel("Tumor Burden TB(t)", fontsize=12)
 plt.title("Porównanie: PDE vs ODE vs Supermodel", fontsize=13)
 plt.legend(fontsize=10)
 plt.grid(alpha=0.3)
-savefig_root("supermodel_tb_compare.png")
+savefig_fig("supermodel_tb_compare.png")
 plt.show()
 
 print("\n[Supermodel] Metryki:")
@@ -1228,7 +1228,7 @@ if PDE_OK:
         plt.legend(fontsize=10)
         plt.grid(alpha=0.3)
 
-        fname = f"supermodel_supernet_tb_dose{str(p_dose).replace('.', '')}.png"
+        fname = f"out/supermodel_supernet_tb_dose{str(p_dose).replace('.', '')}.png"
         savefig_root(fname)
         plt.show()
 
@@ -1258,7 +1258,7 @@ print("  Zapisane pliki:")
 print("    - out/supermodel_correction_net.pt")
 print("    - out/supermodel_metrics.json")
 print("    - out/supermodel_tb_curves.csv")
-print("    - supermodel_tb_compare.png")
+print("    - out/supermodel_tb_compare.png")
 
 if PDE_OK:
     print("\n[SUPERNET]")
