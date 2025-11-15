@@ -982,8 +982,7 @@ def train_supernet(supernet, training_data, pde_params, epochs=5000, lr=1e-3,
     """
     supernet = supernet.to(device)
     optimizer = optim.Adam(supernet.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5,
-                                                     patience=300, verbose=False)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=300)
 
     # Dane treningowe
     coll_pts = training_data["collocation"]
