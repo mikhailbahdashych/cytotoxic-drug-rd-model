@@ -1357,22 +1357,37 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
         try:
             _, _, test_dataset = load_dataset_splits(suffix=args.suffix)
 
-            # Test with large MLP
-            model_large = LargeMLP_NODE(state_dim=4, hidden_dim=128, dosing_period=5.0)
-            model_large.load_state_dict(torch.load(OUT_BASE / f"neural_ode_models/model_large_mlp{suffix_str}.pt"))
-            plot_extrapolation_test(model_large, test_dataset, device=device,
-                                   save_path=FIG_BASE / f"neural_ode_extrapolation{suffix_str}.png")
+            # Try large MLP first, fall back to small MLP if not available
+            large_mlp_path = OUT_BASE / f"neural_ode_models/model_large_mlp{suffix_str}.pt"
+            small_mlp_path = OUT_BASE / f"neural_ode_models/model_small_mlp{suffix_str}.pt"
+
+            if large_mlp_path.exists():
+                model = LargeMLP_NODE(state_dim=4, hidden_dim=128, dosing_period=5.0)
+                model.load_state_dict(torch.load(large_mlp_path))
+                model_name = "large_mlp"
+                print("[Extrapolation] Using Large MLP model")
+            elif small_mlp_path.exists():
+                model = SmallMLP_NODE(state_dim=4, hidden_dim=32)
+                model.load_state_dict(torch.load(small_mlp_path))
+                model_name = "small_mlp"
+                print("[Extrapolation] Using Small MLP model (large_mlp not found)")
+            else:
+                raise FileNotFoundError("No trained models found for extrapolation test")
+
+            plot_extrapolation_test(model, test_dataset, device=device,
+                                   save_path=FIG_BASE / f"neural_ode_extrapolation_{model_name}{suffix_str}.png")
         except Exception as e:
             print(f"[Warning] Extrapolation test failed: {e}")
 
         print("\n[Done] Visualization complete!")
-        print("\nGenerated figures:")
-        print(f"  - figs/neural_ode_data_samples{suffix_str}.png")
-        print(f"  - figs/neural_ode_training_curves{suffix_str}.png")
-        print(f"  - figs/neural_ode_test_predictions_small_mlp{suffix_str}.png")
-        print(f"  - figs/neural_ode_test_predictions_large_mlp{suffix_str}.png")
-        print(f"  - figs/neural_ode_architecture_comparison{suffix_str}.png")
-        print(f"  - figs/neural_ode_extrapolation{suffix_str}.png")
+        print("\nGenerated figures (depending on available models):")
+        print(f"  - figs/neural_ode_data_samples{suffix_str}.png (if dataset exists)")
+        print(f"  - figs/neural_ode_training_curves{suffix_str}.png (if both models trained)")
+        print(f"  - figs/neural_ode_test_predictions_small_mlp{suffix_str}.png (if small_mlp evaluated)")
+        print(f"  - figs/neural_ode_test_predictions_large_mlp{suffix_str}.png (if large_mlp evaluated)")
+        print(f"  - figs/neural_ode_architecture_comparison{suffix_str}.png (if both models evaluated)")
+        print(f"  - figs/neural_ode_extrapolation_*{suffix_str}.png (if any model trained)")
+        print(f"\nData files (JSON) saved alongside each figure for analysis!")
 
 # %% [markdown]
 # ## Notebook Usage Examples
