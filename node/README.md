@@ -1,24 +1,335 @@
-Getting to know the issues and applications of NODE neural differential equations.
+# Neural ODE Learning - Execution Guide
 
-Preparation for exercise.
+This file contains the step-by-step commands to run the Neural ODE learning.
 
-1. Generate reference trajectories ("real" data) from your own PDE model (project) or an accurate base model,
-2. Select a time period and time grid (e.g. evenly spaced points).
+## Prerequisites
 
-- Generate N trajectories: different initial conditions or different parameter values, 
-- So you get the data: x_i(t_j), i = 1, ..., N, j = 1, ..., M
-- (Optional) Add measurement noise to simulate measurement inaccuracy.
-- Divide the data into: train (e.g. 80-90% of the trajectory), test (e.g. 10-20%),
+- Python 3.12+
+- uv package manager installed
+- PDE solver file `2_tumor_diffusion_pde_analysis.py` available in the root directory
 
-3. Learn about NODE neural ordinary differential equations.
-4. Build the Neural ODE model: dx/dt = f(x, t, theta), where f(...) is a neural network with theta weights.
+**Note**: The script automatically detects whether you're running from the root or `node/` directory and finds the PDE module accordingly. No manual path configuration needed!
 
-5. Design different network architectures, e.g.:
-- A: MLP "small" (fewer layers / narrow layers),
-- B: MLP "large" (more layers / wide layers),
-- or e.g. MLP vs residual architecture (ResNet). You can change:
-    - number of layers,
-    - number of neurons,
-    - kind of non-linearity.
+## Step 1: Install Dependencies
 
-6. Get to know the libraries for training NODE, e.g. GitHub - caidao22/pnode: A Python library for training neural ODEs. - https://github.com/caidao22/pnode, link to readme - https://raw.githubusercontent.com/caidao22/pnode/refs/heads/main/README.md
+### Option A: Using pnode (recommended, but requires PETSc)
+
+```bash
+# Install PETSc and pnode
+uv pip install petsc petsc4py
+uv pip install git+https://github.com/caidao22/pnode.git
+```
+
+**Note**: If PETSc installation fails (common on some systems), use Option B below.
+
+### Option B: Fallback to torchdiffeq (simpler installation)
+
+```bash
+# Install torchdiffeq as fallback
+uv pip install torchdiffeq
+```
+
+Then edit `neural_ode_learning.py` line ~30 to set `USE_PNODE = False`
+
+## Step 2: Create Directory Structure
+
+```bash
+# Create output directories (run from root directory)
+mkdir -p node/out/neural_ode_dataset
+mkdir -p node/out/neural_ode_models
+mkdir -p node/out/neural_ode_results
+mkdir -p node/figs
+```
+
+## Step 3: Generate Training Data
+
+Generate 50 trajectories from the PDE model with varying parameters and initial conditions.
+
+**Note**: All commands can be run from either the root directory or the `node/` directory. The script will automatically find the PDE module.
+
+### From root directory:
+```bash
+python node/neural_ode_learning.py --mode generate_data
+```
+
+### Or from node directory:
+```bash
+cd node
+python neural_ode_learning.py --mode generate_data
+```
+
+**Expected output**:
+- `out/neural_ode_dataset/train_trajectories.npz` (40 trajectories)
+- `out/neural_ode_dataset/val_trajectories.npz` (5 trajectories)
+- `out/neural_ode_dataset/test_trajectories.npz` (5 trajectories)
+- `out/neural_ode_dataset/metadata.json`
+
+**Runtime**: ~45-50 minutes
+
+## Step 4: Train Small MLP Model
+
+Train the baseline small MLP architecture (2 layers, 32 neurons, ~1.3k parameters).
+
+### From root directory:
+```bash
+python node/neural_ode_learning.py --mode train --model small_mlp --epochs 500
+```
+
+### Or from node directory:
+```bash
+python neural_ode_learning.py --mode train --model small_mlp --epochs 500
+```
+
+**Expected output**:
+- `out/neural_ode_models/model_small_mlp.pt`
+- `out/neural_ode_models/training_history_small_mlp.csv`
+
+**Runtime**: ~15-20 minutes
+
+## Step 5: Train Large MLP Model
+
+Train the large MLP architecture with Fourier time encoding (4 layers, 128 neurons, ~33k parameters).
+
+### From root directory:
+```bash
+python node/neural_ode_learning.py --mode train --model large_mlp --epochs 500
+```
+
+### Or from node directory:
+```bash
+python neural_ode_learning.py --mode train --model large_mlp --epochs 500
+```
+
+**Expected output**:
+- `out/neural_ode_models/model_large_mlp.pt`
+- `out/neural_ode_models/training_history_large_mlp.csv`
+
+**Runtime**: ~35-45 minutes
+
+## Step 6: Evaluate Models
+
+Evaluate both models on the test set.
+
+### From root directory:
+```bash
+# Evaluate Small MLP
+python node/neural_ode_learning.py --mode evaluate --model small_mlp
+
+# Evaluate Large MLP
+python node/neural_ode_learning.py --mode evaluate --model large_mlp
+```
+
+### Or from node directory:
+```bash
+# Evaluate Small MLP
+python neural_ode_learning.py --mode evaluate --model small_mlp
+
+# Evaluate Large MLP
+python neural_ode_learning.py --mode evaluate --model large_mlp
+```
+
+**Expected output**:
+- `out/neural_ode_results/metrics_small_mlp.json`
+- `out/neural_ode_results/metrics_large_mlp.json`
+- Console output with RMSE, MAE metrics
+
+## Step 7: Generate Visualizations
+
+Create all comparison figures and visualizations.
+
+### From root directory:
+```bash
+python node/neural_ode_learning.py --mode visualize
+```
+
+### Or from node directory:
+```bash
+python neural_ode_learning.py --mode visualize
+```
+
+**Expected output**:
+- `figs/neural_ode_data_samples.png` - Sample training trajectories
+- `figs/neural_ode_training_curves.png` - Training/validation loss curves
+- `figs/neural_ode_test_predictions.png` - Predictions vs ground truth (4-panel: S, R, I, C)
+- `figs/neural_ode_architecture_comparison.png` - Model comparison bar chart
+- `figs/neural_ode_extrapolation.png` - Extrapolation test beyond training window
+
+## Alternative: Jupyter Notebook Usage
+
+The script can be converted to a Jupyter notebook and run interactively.
+
+### Convert to Notebook
+
+Using jupytext:
+```bash
+pip install jupytext
+jupytext --to notebook node/neural_ode_learning.py
+```
+
+Or use VS Code or PyCharm, which recognize the `# %%` cell markers and can execute cells interactively.
+
+### Run in Notebook
+
+Once in a notebook, you can call the main function directly:
+
+```python
+# Generate data
+main(mode='generate_data')
+
+# Train models
+main(mode='train', model='small_mlp', epochs=500)
+main(mode='train', model='large_mlp', epochs=500)
+
+# Evaluate
+main(mode='evaluate', model='small_mlp')
+main(mode='evaluate', model='large_mlp')
+
+# Visualize
+main(mode='visualize')
+```
+
+### Quick Test in Notebook
+
+For faster testing with smaller dataset:
+```python
+# Modify function call to use fewer trajectories
+dataset = generate_neural_ode_dataset(n_trajectories=10, T=6.0, N_grid=48)
+save_dataset(dataset)
+
+# Train with fewer epochs
+main(mode='train', model='small_mlp', epochs=50, batch_size=4)
+main(mode='evaluate', model='small_mlp')
+```
+
+## Optional: Advanced Usage
+
+### Use Different ODE Solver (pnode only)
+
+From node directory:
+```bash
+# Train with DOPRI5 solver instead of default RK4
+python neural_ode_learning.py --mode train --model small_mlp --ts_type dopri5
+
+# Other available solvers: euler, rk4, dopri5 (if using pnode)
+```
+
+### Adjust Training Hyperparameters
+
+From node directory:
+```bash
+# Train with custom learning rate and batch size
+python neural_ode_learning.py --mode train --model large_mlp --epochs 300 --lr 0.0005 --batch_size 16
+```
+
+Or from root directory:
+```bash
+python node/neural_ode_learning.py --mode train --model large_mlp --epochs 300 --lr 0.0005 --batch_size 16
+```
+
+### Run All Steps in Sequence
+
+From root directory:
+```bash
+# Complete pipeline (data generation + training + evaluation + visualization)
+python node/neural_ode_learning.py --mode generate_data && \
+python node/neural_ode_learning.py --mode train --model small_mlp --epochs 500 && \
+python node/neural_ode_learning.py --mode train --model large_mlp --epochs 500 && \
+python node/neural_ode_learning.py --mode evaluate --model small_mlp && \
+python node/neural_ode_learning.py --mode evaluate --model large_mlp && \
+python node/neural_ode_learning.py --mode visualize
+```
+
+Or from node directory:
+```bash
+cd node
+python neural_ode_learning.py --mode generate_data && \
+python neural_ode_learning.py --mode train --model small_mlp --epochs 500 && \
+python neural_ode_learning.py --mode train --model large_mlp --epochs 500 && \
+python neural_ode_learning.py --mode evaluate --model small_mlp && \
+python neural_ode_learning.py --mode evaluate --model large_mlp && \
+python neural_ode_learning.py --mode visualize
+```
+
+## Expected Results
+
+### Performance Targets
+
+**Small MLP**:
+- RMSE (Tumor Burden): < 0.15
+- Training time: ~20 minutes
+- Inference: < 0.1s per trajectory
+
+**Large MLP**:
+- RMSE (Tumor Burden): < 0.08
+- Training time: ~40 minutes
+- Inference: < 0.2s per trajectory
+
+### Key Findings
+
+- Large MLP should capture periodic dosing patterns better (Fourier encoding)
+- Both models should be 100x faster than PDE solver for predictions
+- Small degradation expected when extrapolating beyond training window (t > 6)
+
+## Troubleshooting
+
+### PETSc Installation Fails
+
+Use torchdiffeq fallback (see Step 1, Option B).
+
+### Out of Memory During Training
+
+Reduce batch size:
+```bash
+python neural_ode_learning.py --mode train --model large_mlp --batch_size 4
+```
+
+### Data Generation Too Slow
+
+Reduce grid resolution by editing `neural_ode_learning.py` line ~200:
+```python
+N_grid = 48  # instead of 64
+```
+
+### CUDA/GPU Errors
+
+Force CPU mode by editing `neural_ode_learning.py` line ~50:
+```python
+device = torch.device("cpu")
+```
+
+## File Structure After Execution
+
+```
+node/
+├── README.md
+├── COMMANDS.md (this file)
+├── neural_ode_learning.py
+├── out/
+│   ├── neural_ode_dataset/
+│   │   ├── train_trajectories.npz
+│   │   ├── val_trajectories.npz
+│   │   ├── test_trajectories.npz
+│   │   └── metadata.json
+│   ├── neural_ode_models/
+│   │   ├── model_small_mlp.pt
+│   │   ├── model_large_mlp.pt
+│   │   ├── training_history_small_mlp.csv
+│   │   └── training_history_large_mlp.csv
+│   └── neural_ode_results/
+│       ├── metrics_small_mlp.json
+│       ├── metrics_large_mlp.json
+│       └── metrics_summary.json
+└── figs/
+    ├── neural_ode_data_samples.png
+    ├── neural_ode_training_curves.png
+    ├── neural_ode_test_predictions.png
+    ├── neural_ode_architecture_comparison.png
+    └── neural_ode_extrapolation.png
+```
+
+## Questions or Issues?
+
+Refer to:
+- pnode repository: https://github.com/caidao22/pnode
+- torchdiffeq repository: https://github.com/rtqichen/torchdiffeq
+- Original task description: `node/README.md`
