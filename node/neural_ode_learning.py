@@ -1410,7 +1410,8 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 # ```
 
 # %%
-run_node(mode='generate_data', suffix='small_mlp_run')
+# run_node(mode='generate_data', suffix='small_mlp_run')
+# run_node(mode='generate_data', suffix='large_mlp_run')
 
 # %% [markdown]
 # ### Example 2: Train Both Models (with suffix)
@@ -1424,7 +1425,8 @@ run_node(mode='generate_data', suffix='small_mlp_run')
 # ```
 
 # %%
-run_node(mode='train', model='small_mlp', epochs=500, batch_size=128, lr=1e-3, suffix='small_mlp_run')
+# run_node(mode='train', model='small_mlp', epochs=500, batch_size=128, lr=1e-3, suffix='small_mlp_run')
+# run_node(mode='train', model='large_mlp', epochs=1500, batch_size=256, lr=1e-3, suffix='large_mlp_run')
 
 # %% [markdown]
 # ### Example 3: Evaluate Both Models
@@ -1435,7 +1437,8 @@ run_node(mode='train', model='small_mlp', epochs=500, batch_size=128, lr=1e-3, s
 # ```
 
 # %%
-run_node(mode='evaluate', model='small_mlp', suffix='small_mlp_run')
+# run_node(mode='evaluate', model='small_mlp', suffix='small_mlp_run')
+# run_node(mode='evaluate', model='large_mlp', suffix='large_mlp_run')
 
 # %% [markdown]
 # ### Example 4: Generate Visualizations
@@ -1445,7 +1448,8 @@ run_node(mode='evaluate', model='small_mlp', suffix='small_mlp_run')
 # ```
 
 # %%
-run_node(mode='visualize', suffix='small_mlp_run')
+# run_node(mode='visualize', suffix='small_mlp_run')
+# run_node(mode='visualize', suffix='large_mlp_run')
 
 # %% [markdown]
 # ### Example 5: Complete Pipeline with Timestamp
