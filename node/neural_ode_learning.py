@@ -94,11 +94,22 @@ Grid = pde_module.Grid
 Params = pde_module.Params
 init_fields = pde_module.init_fields
 
-# Setup directories
-Path("out/neural_ode_dataset").mkdir(parents=True, exist_ok=True)
-Path("out/neural_ode_models").mkdir(parents=True, exist_ok=True)
-Path("out/neural_ode_results").mkdir(parents=True, exist_ok=True)
-Path("figs").mkdir(parents=True, exist_ok=True)
+# Setup directories - use node/ prefix when running from root
+# Detect if we're in the root directory or node directory
+if Path("node").exists() and Path("node").is_dir():
+    # Running from root directory
+    OUT_BASE = Path("node/out")
+    FIG_BASE = Path("node/figs")
+else:
+    # Running from node directory
+    OUT_BASE = Path("out")
+    FIG_BASE = Path("figs")
+
+# Create directories
+(OUT_BASE / "neural_ode_dataset").mkdir(parents=True, exist_ok=True)
+(OUT_BASE / "neural_ode_models").mkdir(parents=True, exist_ok=True)
+(OUT_BASE / "neural_ode_results").mkdir(parents=True, exist_ok=True)
+FIG_BASE.mkdir(parents=True, exist_ok=True)
 
 # Device setup
 device = torch.device(
@@ -386,9 +397,9 @@ def save_dataset(dataset, train_frac=0.8, val_frac=0.1):
     test_data = dataset[n_train+n_val:]
 
     # Save
-    np.savez_compressed("out/neural_ode_dataset/train_trajectories.npz", trajectories=train_data)
-    np.savez_compressed("out/neural_ode_dataset/val_trajectories.npz", trajectories=val_data)
-    np.savez_compressed("out/neural_ode_dataset/test_trajectories.npz", trajectories=test_data)
+    np.savez_compressed(OUT_BASE / "neural_ode_dataset/train_trajectories.npz", trajectories=train_data)
+    np.savez_compressed(OUT_BASE / "neural_ode_dataset/val_trajectories.npz", trajectories=val_data)
+    np.savez_compressed(OUT_BASE / "neural_ode_dataset/test_trajectories.npz", trajectories=test_data)
 
     # Save metadata
     metadata = {
@@ -398,7 +409,7 @@ def save_dataset(dataset, train_frac=0.8, val_frac=0.1):
         'n_test': n_test,
         'split': {'train': train_frac, 'val': val_frac, 'test': 1-train_frac-val_frac}
     }
-    save_json(metadata, "out/neural_ode_dataset/metadata.json")
+    save_json(metadata, OUT_BASE / "neural_ode_dataset/metadata.json")
 
     print(f"\n[Dataset Split]")
     print(f"  Train: {n_train} trajectories")
@@ -456,9 +467,9 @@ def load_dataset_splits(noise_level=0.0):
     Returns:
         train_dataset, val_dataset, test_dataset
     """
-    train_data = np.load("out/neural_ode_dataset/train_trajectories.npz", allow_pickle=True)['trajectories']
-    val_data = np.load("out/neural_ode_dataset/val_trajectories.npz", allow_pickle=True)['trajectories']
-    test_data = np.load("out/neural_ode_dataset/test_trajectories.npz", allow_pickle=True)['trajectories']
+    train_data = np.load(OUT_BASE / "neural_ode_dataset/train_trajectories.npz", allow_pickle=True)['trajectories']
+    val_data = np.load(OUT_BASE / "neural_ode_dataset/val_trajectories.npz", allow_pickle=True)['trajectories']
+    test_data = np.load(OUT_BASE / "neural_ode_dataset/test_trajectories.npz", allow_pickle=True)['trajectories']
 
     train_dataset = NODEDataset(train_data, noise_level=noise_level)
     val_dataset = NODEDataset(val_data, noise_level=0.0)  # No noise for validation
@@ -865,8 +876,10 @@ def evaluate_model(model, test_loader, device='cpu'):
 # ## Section 7: Visualization
 
 # %%
-def plot_data_samples(dataset, n_samples=16, save_path="figs/neural_ode_data_samples.png"):
+def plot_data_samples(dataset, n_samples=16, save_path=None):
     """Plot sample trajectories from dataset"""
+    if save_path is None:
+        save_path = FIG_BASE / "neural_ode_data_samples.png"
     fig, axes = plt.subplots(4, 4, figsize=(16, 14))
     axes = axes.flatten()
 
@@ -896,8 +909,10 @@ def plot_data_samples(dataset, n_samples=16, save_path="figs/neural_ode_data_sam
     plt.close()
 
 
-def plot_training_curves(history_small, history_large, save_path="figs/neural_ode_training_curves.png"):
+def plot_training_curves(history_small, history_large, save_path=None):
     """Plot training and validation loss curves for both models"""
+    if save_path is None:
+        save_path = FIG_BASE / "neural_ode_training_curves.png"
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # Small MLP
@@ -927,8 +942,10 @@ def plot_training_curves(history_small, history_large, save_path="figs/neural_od
     plt.close()
 
 
-def plot_test_predictions(predictions, model_name, save_path="figs/neural_ode_test_predictions.png"):
+def plot_test_predictions(predictions, model_name, save_path=None):
     """Plot predictions vs ground truth for first test trajectory"""
+    if save_path is None:
+        save_path = FIG_BASE / "neural_ode_test_predictions.png"
     pred = predictions[0]
     t = pred['t']
     x_pred = pred['x_pred']
@@ -956,8 +973,10 @@ def plot_test_predictions(predictions, model_name, save_path="figs/neural_ode_te
     plt.close()
 
 
-def plot_architecture_comparison(metrics_small, metrics_large, save_path="figs/neural_ode_architecture_comparison.png"):
+def plot_architecture_comparison(metrics_small, metrics_large, save_path=None):
     """Bar chart comparing model architectures"""
+    if save_path is None:
+        save_path = FIG_BASE / "neural_ode_architecture_comparison.png"
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     models = ['Small MLP', 'Large MLP']
@@ -994,8 +1013,10 @@ def plot_architecture_comparison(metrics_small, metrics_large, save_path="figs/n
     plt.close()
 
 
-def plot_extrapolation_test(model, test_dataset, device='cpu', save_path="figs/neural_ode_extrapolation.png"):
+def plot_extrapolation_test(model, test_dataset, device='cpu', save_path=None):
     """Test model extrapolation beyond training window"""
+    if save_path is None:
+        save_path = FIG_BASE / "neural_ode_extrapolation.png"
     model.eval()
     model = model.to(device)
 
@@ -1111,7 +1132,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
         print(f"Parameters: {count_parameters(model):,}")
 
         # Train
-        save_path = f"out/neural_ode_models/model_{args.model}.pt"
+        save_path = OUT_BASE / f"neural_ode_models/model_{args.model}.pt"
         model, history = train_neural_ode(
             model, train_loader, val_loader,
             num_epochs=args.epochs,
@@ -1123,7 +1144,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 
         # Save training history
         history_df = pd.DataFrame(history)
-        history_path = f"out/neural_ode_models/training_history_{args.model}.csv"
+        history_path = OUT_BASE / f"neural_ode_models/training_history_{args.model}.csv"
         history_df.to_csv(history_path, index=False)
         print(f"[Saved] Training history: {history_path}")
 
@@ -1147,7 +1168,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
         else:  # large_mlp
             model = LargeMLP_NODE(state_dim=4, hidden_dim=128, dosing_period=5.0)
 
-        model_path = f"out/neural_ode_models/model_{args.model}.pt"
+        model_path = OUT_BASE / f"neural_ode_models/model_{args.model}.pt"
         model.load_state_dict(torch.load(model_path))
         print(f"[Loaded] Model from {model_path}")
 
@@ -1160,11 +1181,11 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
             print(f"  {key}: {value:.6f}")
 
         # Save metrics
-        metrics_path = f"out/neural_ode_results/metrics_{args.model}.json"
+        metrics_path = OUT_BASE / f"neural_ode_results/metrics_{args.model}.json"
         save_json(metrics, metrics_path)
 
         # Plot predictions
-        plot_path = f"figs/neural_ode_test_predictions_{args.model}.png"
+        plot_path = FIG_BASE / f"neural_ode_test_predictions_{args.model}.png"
         plot_test_predictions(predictions, args.model.upper(), save_path=plot_path)
 
         print("\n[Done] Evaluation complete!")
@@ -1179,16 +1200,16 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 
         # Load training histories
         try:
-            history_small = pd.read_csv("out/neural_ode_models/training_history_small_mlp.csv").to_dict('list')
-            history_large = pd.read_csv("out/neural_ode_models/training_history_large_mlp.csv").to_dict('list')
+            history_small = pd.read_csv(OUT_BASE / "neural_ode_models/training_history_small_mlp.csv").to_dict('list')
+            history_large = pd.read_csv(OUT_BASE / "neural_ode_models/training_history_large_mlp.csv").to_dict('list')
             plot_training_curves(history_small, history_large)
         except FileNotFoundError:
             print("[Warning] Training histories not found, skipping training curves plot")
 
         # Load metrics
         try:
-            metrics_small = load_json("out/neural_ode_results/metrics_small_mlp.json")
-            metrics_large = load_json("out/neural_ode_results/metrics_large_mlp.json")
+            metrics_small = load_json(OUT_BASE / "neural_ode_results/metrics_small_mlp.json")
+            metrics_large = load_json(OUT_BASE / "neural_ode_results/metrics_large_mlp.json")
             plot_architecture_comparison(metrics_small, metrics_large)
 
             # Create summary
@@ -1196,7 +1217,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
                 'small_mlp': metrics_small,
                 'large_mlp': metrics_large
             }
-            save_json(metrics_summary, "out/neural_ode_results/metrics_summary.json")
+            save_json(metrics_summary, OUT_BASE / "neural_ode_results/metrics_summary.json")
         except FileNotFoundError:
             print("[Warning] Metrics not found, skipping comparison plot")
 
@@ -1206,7 +1227,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 
             # Test with large MLP
             model_large = LargeMLP_NODE(state_dim=4, hidden_dim=128, dosing_period=5.0)
-            model_large.load_state_dict(torch.load("out/neural_ode_models/model_large_mlp.pt"))
+            model_large.load_state_dict(torch.load(OUT_BASE / "neural_ode_models/model_large_mlp.pt"))
             plot_extrapolation_test(model_large, test_dataset, device=device)
         except Exception as e:
             print(f"[Warning] Extrapolation test failed: {e}")
@@ -1229,7 +1250,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 # ### Example 1: Generate Dataset
 # ```python
 # # Uncomment to run:
-# # run_node(mode='generate_data')
+# run_node(mode='generate_data')
 # ```
 
 # %%
@@ -1239,7 +1260,7 @@ run_node(mode='generate_data')
 # ### Example 2: Train Small MLP
 # ```python
 # # Uncomment to run:
-# # run_node(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
+# run_node(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
 # ```
 
 # %%
@@ -1249,15 +1270,15 @@ run_node(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
 # ### Example 3: Train Large MLP
 # ```python
 # # Uncomment to run:
-# # run_node(mode='train', model='large_mlp', epochs=500, batch_size=8, lr=1e-3)
+# run_node(mode='train', model='large_mlp', epochs=500, batch_size=8, lr=1e-3)
 # ```
 
 # %% [markdown]
 # ### Example 4: Evaluate Model
 # ```python
 # # Uncomment to run:
-# # run_node(mode='evaluate', model='small_mlp')
-# # run_node(mode='evaluate', model='large_mlp')
+# run_node(mode='evaluate', model='small_mlp')
+# run_node(mode='evaluate', model='large_mlp')
 # ```
 
 # %%
@@ -1267,7 +1288,7 @@ run_node(mode='evaluate', model='small_mlp')
 # ### Example 5: Generate Visualizations
 # ```python
 # # Uncomment to run:
-# # run_node(mode='visualize')
+# run_node(mode='visualize')
 # ```
 
 # %%
