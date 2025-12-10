@@ -1,27 +1,26 @@
-"""
-Neural ODE Learning for Cytotoxic Drug R&D Model
+# %% [markdown]
+# # Neural ODE Learning for Cytotoxic Drug R&D Model
+# 
+# **Task**: Learn the dynamics of the 4-variable PDE system (S, R, I, C) using Neural ODEs.
+# Train neural networks to approximate dx/dt = f_θ(x, t) from PDE-generated trajectories.
+# 
+# ## Structure:
+# - Section 1: Imports and Setup
+# - Section 2: Data Generation from PDE
+# - Section 3: Dataset Class and DataLoader
+# - Section 4: Neural ODE Architectures (Small MLP, Large MLP)
+# - Section 5: Training Functions
+# - Section 6: Evaluation and Metrics
+# - Section 7: Visualization
+# - Section 8: Main Execution
+# 
+# **Author**: Generated for ISZ Project
+# **Date**: 2025
 
-Task: Learn the dynamics of the 4-variable PDE system (S, R, I, C) using Neural ODEs.
-      Train neural networks to approximate dx/dt = f_θ(x, t) from PDE-generated trajectories.
+# %% [markdown]
+# ## Section 1: Imports and Setup
 
-Structure:
-- Section 1: Imports and Setup
-- Section 2: Data Generation from PDE
-- Section 3: Dataset Class and DataLoader
-- Section 4: Neural ODE Architectures (Small MLP, Large MLP)
-- Section 5: Training Functions
-- Section 6: Evaluation and Metrics
-- Section 7: Visualization
-- Section 8: Main Execution
-
-Author: Generated for ISZ Project
-Date: 2025
-"""
-
-# ============================================================================
-# Section 1: Imports and Setup
-# ============================================================================
-
+# %%
 import os
 import sys
 import json
@@ -42,7 +41,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 # Neural ODE libraries
-USE_PNODE = True  # Set to False to use torchdiffeq as fallback
+USE_PNODE = False  # Set to False to use torchdiffeq as fallback
 
 try:
     if USE_PNODE:
@@ -63,19 +62,31 @@ except ImportError as e:
         print("Or: uv pip install torchdiffeq")
         sys.exit(1)
 
-# Import PDE module from parent directory
+# Import PDE module
 import importlib.util
+
+# Try to find the PDE module in the root directory
+pde_module_path = Path("2_tumor_diffusion_pde_analysis.py")
+if not pde_module_path.exists():
+    # If not found, try parent directory (for backward compatibility)
+    pde_module_path = Path("../2_tumor_diffusion_pde_analysis.py")
+    if not pde_module_path.exists():
+        print("[ERROR] Cannot find 2_tumor_diffusion_pde_analysis.py")
+        print("Looked in:")
+        print("  - ./2_tumor_diffusion_pde_analysis.py (root)")
+        print("  - ../2_tumor_diffusion_pde_analysis.py (parent)")
+        sys.exit(1)
+
 spec = importlib.util.spec_from_file_location(
-    "pde_module", "../2_tumor_diffusion_pde_analysis.py"
+    "pde_module", str(pde_module_path.resolve())
 )
 pde_module = importlib.util.module_from_spec(spec)
 sys.modules["pde_module"] = pde_module
 try:
     spec.loader.exec_module(pde_module)
-    print("[OK] PDE module imported from parent directory")
+    print(f"[OK] PDE module imported from {pde_module_path}")
 except Exception as e:
     print(f"[ERROR] Failed to import PDE module: {e}")
-    print("Make sure 2_tumor_diffusion_pde_analysis.py exists in parent directory")
     sys.exit(1)
 
 # Import needed components from PDE module
@@ -128,12 +139,11 @@ def mae(pred, true):
     """Mean absolute error"""
     return np.mean(np.abs(pred - true))
 
+# %% [markdown]
+# ## Section 2: Data Generation from PDE
 
-# ============================================================================
-# Section 2: Data Generation from PDE
-# ============================================================================
-
-def run_pde_simulation_for_node(grid, params, T=6.0, dt=0.01, save_every=10):
+# %%
+def run_pde_simulation_for_node(grid, params, T=6.0, dt=0.01, save_every=10, custom_init=None):
     """
     Run PDE simulation and extract spatially-averaged trajectory for Neural ODE training.
 
@@ -143,15 +153,20 @@ def run_pde_simulation_for_node(grid, params, T=6.0, dt=0.01, save_every=10):
         T: Final time
         dt: Time step
         save_every: Save frequency
+        custom_init: Optional tuple (S, R, I, C) for custom initial conditions
 
     Returns:
         dict with keys: t (time array), state (spatially averaged [S̄, R̄, Ī, C̄]), TB (tumor burden)
     """
     # Initialize fields
-    S, R, I, C = init_fields(grid, params)
+    if custom_init is not None:
+        S, R, I, C = custom_init
+    else:
+        S, R, I, C = init_fields(grid)
 
     # Get solver function
-    if hasattr(pde_module, 'step_semi_implicit'):
+    use_semi_implicit = hasattr(pde_module, 'step_semi_implicit')
+    if use_semi_implicit:
         step_func = pde_module.step_semi_implicit
         print("[PDE] Using semi-implicit solver")
     else:
@@ -184,7 +199,16 @@ def run_pde_simulation_for_node(grid, params, T=6.0, dt=0.01, save_every=10):
     # Time integration
     for step in range(n_steps):
         # Take PDE step
-        S, R, I, C = step_func(S, R, I, C, grid, params, dt, t_current)
+        if use_semi_implicit:
+            # semi_implicit needs system matrices - check if available
+            if hasattr(pde_module, 'precompute_system_matrices'):
+                sys_mats = pde_module.precompute_system_matrices(grid, params, dt)
+                S, R, I, C = step_func(S, R, I, C, grid, dt, params, sys_mats)
+            else:
+                # Fallback to explicit if no system matrices
+                S, R, I, C = pde_module.step_explicit(S, R, I, C, grid, dt, params)
+        else:
+            S, R, I, C = step_func(S, R, I, C, grid, dt, params)
         t_current += dt
 
         # Save at specified frequency
@@ -319,13 +343,12 @@ def generate_neural_ode_dataset(n_trajectories=50, T=6.0, N_grid=64, verbose=Tru
         # Generate initial conditions
         S, R, I, C = generate_initial_conditions(grid, seed=i+100)
 
-        # Override init_fields to use our custom ICs
-        original_init = pde_module.init_fields
-        pde_module.init_fields = lambda g, p: (S, R, I, C)
-
-        # Run PDE simulation
+        # Run PDE simulation with custom initial conditions
         try:
-            trajectory = run_pde_simulation_for_node(grid, params, T=T, dt=0.01, save_every=10)
+            trajectory = run_pde_simulation_for_node(
+                grid, params, T=T, dt=0.01, save_every=10,
+                custom_init=(S, R, I, C)
+            )
 
             # Store trajectory with metadata
             dataset.append({
@@ -338,9 +361,6 @@ def generate_neural_ode_dataset(n_trajectories=50, T=6.0, N_grid=64, verbose=Tru
         except Exception as e:
             print(f"\n[ERROR] Failed to generate trajectory {i}: {e}")
             continue
-        finally:
-            # Restore original init_fields
-            pde_module.init_fields = original_init
 
     print(f"\n[Success] Generated {len(dataset)} trajectories")
     return dataset
@@ -386,11 +406,10 @@ def save_dataset(dataset, train_frac=0.8, val_frac=0.1):
     print(f"  Test:  {n_test} trajectories")
     print(f"  Total: {n_total} trajectories")
 
+# %% [markdown]
+# ## Section 3: Dataset Class and DataLoader
 
-# ============================================================================
-# Section 3: Dataset Class and DataLoader
-# ============================================================================
-
+# %%
 class NODEDataset(Dataset):
     """
     PyTorch Dataset for Neural ODE training.
@@ -452,11 +471,10 @@ def load_dataset_splits(noise_level=0.0):
 
     return train_dataset, val_dataset, test_dataset
 
+# %% [markdown]
+# ## Section 4: Neural ODE Architectures
 
-# ============================================================================
-# Section 4: Neural ODE Architectures
-# ============================================================================
-
+# %%
 class SmallMLP_NODE(nn.Module):
     """
     Small MLP Neural ODE architecture (Architecture A).
@@ -559,11 +577,10 @@ def count_parameters(model):
     """Count total number of trainable parameters in model"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+# %% [markdown]
+# ## Section 5: Training Functions
 
-# ============================================================================
-# Section 5: Training Functions
-# ============================================================================
-
+# %%
 def ode_solve(model, x0, t, method='rk4'):
     """
     Solve ODE using appropriate library (pnode or torchdiffeq).
@@ -781,11 +798,10 @@ def train_neural_ode(
 
     return model, history
 
+# %% [markdown]
+# ## Section 6: Evaluation and Metrics
 
-# ============================================================================
-# Section 6: Evaluation and Metrics
-# ============================================================================
-
+# %%
 def evaluate_model(model, test_loader, device='cpu'):
     """
     Evaluate Neural ODE model on test set.
@@ -845,11 +861,10 @@ def evaluate_model(model, test_loader, device='cpu'):
 
     return metrics, predictions
 
+# %% [markdown]
+# ## Section 7: Visualization
 
-# ============================================================================
-# Section 7: Visualization
-# ============================================================================
-
+# %%
 def plot_data_samples(dataset, n_samples=16, save_path="figs/neural_ode_data_samples.png"):
     """Plot sample trajectories from dataset"""
     fig, axes = plt.subplots(4, 4, figsize=(16, 14))
@@ -1028,25 +1043,33 @@ def plot_extrapolation_test(model, test_dataset, device='cpu', save_path="figs/n
     savefig(save_path)
     plt.close()
 
+# %% [markdown]
+# ## Section 8: Main Execution
 
-# ============================================================================
-# Section 8: Main Execution
-# ============================================================================
+# %%
+def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts_type='rk4'):
+    """
+    Main execution function that works both from command line and notebook.
 
-def main():
-    parser = argparse.ArgumentParser(description='Neural ODE Learning for Cytotoxic Drug R&D Model')
-    parser.add_argument('--mode', type=str, required=True,
-                        choices=['generate_data', 'train', 'evaluate', 'visualize'],
-                        help='Execution mode')
-    parser.add_argument('--model', type=str, default='small_mlp',
-                        choices=['small_mlp', 'large_mlp'],
-                        help='Model architecture')
-    parser.add_argument('--epochs', type=int, default=500, help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--ts_type', type=str, default='rk4', help='ODE solver type (for pnode)')
+    Args:
+        mode: Execution mode ('generate_data', 'train', 'evaluate', 'visualize')
+        model: Model architecture ('small_mlp', 'large_mlp')
+        epochs: Number of training epochs
+        batch_size: Batch size for training
+        lr: Learning rate
+        ts_type: ODE solver type
+    """
 
-    args = parser.parse_args()
+    # Create a simple args object for compatibility
+    class Args:
+        pass
+    args = Args()
+    args.mode = mode
+    args.model = model
+    args.epochs = epochs
+    args.batch_size = batch_size
+    args.lr = lr
+    args.ts_type = ts_type
 
     # ========================================================================
     # Mode: Generate Data
@@ -1197,6 +1220,59 @@ def main():
         print("  - figs/neural_ode_architecture_comparison.png")
         print("  - figs/neural_ode_extrapolation.png")
 
+# %% [markdown]
+# ## Notebook Usage Examples
+# 
+# When running in a Jupyter notebook, you can call the main function directly with parameters:
 
-if __name__ == "__main__":
-    main()
+# %% [markdown]
+# ### Example 1: Generate Dataset
+# ```python
+# # Uncomment to run:
+# # run_node(mode='generate_data')
+# ```
+
+# %%
+run_node(mode='generate_data')
+
+# %% [markdown]
+# ### Example 2: Train Small MLP
+# ```python
+# # Uncomment to run:
+# # main(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
+# ```
+
+# %% [markdown]
+# ### Example 3: Train Large MLP
+# ```python
+# # Uncomment to run:
+# # main(mode='train', model='large_mlp', epochs=500, batch_size=8, lr=1e-3)
+# ```
+
+# %% [markdown]
+# ### Example 4: Evaluate Model
+# ```python
+# # Uncomment to run:
+# # main(mode='evaluate', model='small_mlp')
+# # main(mode='evaluate', model='large_mlp')
+# ```
+
+# %% [markdown]
+# ### Example 5: Generate Visualizations
+# ```python
+# # Uncomment to run:
+# # main(mode='visualize')
+# ```
+
+# %% [markdown]
+# ### Example 6: Quick Test Run (Small Dataset and Epochs)
+# ```python
+# # For quick testing, you can modify the generate_neural_ode_dataset function
+# # to use fewer trajectories, e.g., n_trajectories=10
+# # Then train with fewer epochs:
+# # main(mode='generate_data')  # Modify n_trajectories in code first
+# # main(mode='train', model='small_mlp', epochs=50, batch_size=4)
+# # main(mode='evaluate', model='small_mlp')
+# ```
+
+
