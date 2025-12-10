@@ -1,0 +1,12 @@
+{
+  "n_total": 50,
+  "n_train": 40,
+  "n_val": 5,
+  "n_test": 5,
+  "split": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.09999999999999995
+  },
+  "suffix": "large_mlp_run"
+}
