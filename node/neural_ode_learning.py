@@ -694,7 +694,7 @@ def train_neural_ode(
     model = model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=20, verbose=True
+        optimizer, mode='min', factor=0.5, patience=20
     )
 
     history = {
@@ -1079,7 +1079,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
         print("MODE: Generate Data")
         print("="*60)
 
-        dataset = generate_neural_ode_dataset(n_trajectories=50, T=6.0, N_grid=64, verbose=True)
+        dataset = generate_neural_ode_dataset(n_trajectories=50, T=6.0, N_grid=64)
         save_dataset(dataset, train_frac=0.8, val_frac=0.1)
 
         # Visualize sample trajectories
@@ -1239,30 +1239,39 @@ run_node(mode='generate_data')
 # ### Example 2: Train Small MLP
 # ```python
 # # Uncomment to run:
-# # main(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
+# # run_node(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
 # ```
+
+# %%
+run_node(mode='train', model='small_mlp', epochs=500, batch_size=8, lr=1e-3)
 
 # %% [markdown]
 # ### Example 3: Train Large MLP
 # ```python
 # # Uncomment to run:
-# # main(mode='train', model='large_mlp', epochs=500, batch_size=8, lr=1e-3)
+# # run_node(mode='train', model='large_mlp', epochs=500, batch_size=8, lr=1e-3)
 # ```
 
 # %% [markdown]
 # ### Example 4: Evaluate Model
 # ```python
 # # Uncomment to run:
-# # main(mode='evaluate', model='small_mlp')
-# # main(mode='evaluate', model='large_mlp')
+# # run_node(mode='evaluate', model='small_mlp')
+# # run_node(mode='evaluate', model='large_mlp')
 # ```
+
+# %%
+run_node(mode='evaluate', model='small_mlp')
 
 # %% [markdown]
 # ### Example 5: Generate Visualizations
 # ```python
 # # Uncomment to run:
-# # main(mode='visualize')
+# # run_node(mode='visualize')
 # ```
+
+# %%
+run_node(mode='visualize')
 
 # %% [markdown]
 # ### Example 6: Quick Test Run (Small Dataset and Epochs)
@@ -1270,9 +1279,9 @@ run_node(mode='generate_data')
 # # For quick testing, you can modify the generate_neural_ode_dataset function
 # # to use fewer trajectories, e.g., n_trajectories=10
 # # Then train with fewer epochs:
-# # main(mode='generate_data')  # Modify n_trajectories in code first
-# # main(mode='train', model='small_mlp', epochs=50, batch_size=4)
-# # main(mode='evaluate', model='small_mlp')
+# # run_node(mode='generate_data')  # Modify n_trajectories in code first
+# # run_node(mode='train', model='small_mlp', epochs=50, batch_size=4)
+# # run_node(mode='evaluate', model='small_mlp')
 # ```
 
 
