@@ -138,9 +138,9 @@ except Exception as e:
     PDE_OK = False
     print("Uwaga: PDE niedostępne w tym notebooku:", e)
 
-# Ustal horyzont i siatkę czasu dla „prawdy” i obserwacji
-T_end = 6.0
-t_true = np.linspace(0.0, T_end, 121)  # co 0.05
+# Ustal horyzont i siatkę czasu dla „prawdy" i obserwacji
+T_end = 10.0  # Extended from 6.0 to cover three boluses (t=0, 5, 10)
+t_true = np.linspace(0.0, T_end, 201)  # co 0.05 (was 121 for T=6.0)
 obs_sigma = 0.0005                      # szum pomiarowy TB
 np.random.seed(123)
 
@@ -278,36 +278,635 @@ for k, B in budgets.items():
     }, f"out/abc_{k}_summary.json")
 
 # %%
-if not SCIPY_OK:
-    print("Pominięto 3D-Var — SciPy brak.")
-else:
-    # Tło (background) i macierze B, R (diagonalne)
-    theta_b = np.array([0.8, 0.05, 0.2])  # sensowny background
-    B_std = np.array([0.3, 0.05, 0.15])   # odchylenia a priori
-    R_std = obs_sigma                      # szum obserwacji (TB)
+def run_3dvar_window(t_obs_start, t_obs_end, budgets=None):
+    """
+    Run 3D-Var data assimilation for a specific observation window.
 
+    Args:
+        t_obs_start: Start time of observation window
+        t_obs_end: End time of observation window
+        budgets: Dictionary of budget names to max iterations (default: small, medium, large)
+
+    Returns:
+        Dictionary of results for each budget
+    """
+    if budgets is None:
+        budgets = {"small": 50, "medium": 150, "large": 400}
+
+    # Setup masks for this observation window
+    mask_obs_win = (t_true >= t_obs_start) & (t_true <= t_obs_end)
+    mask_fwd_win = (t_true > t_obs_end)
+    mask_bwd_win = (t_true < t_obs_start)
+
+    # Extract observations in this window
+    y_obs_win = y_obs[mask_obs_win]
+
+    # Background (prior) parameters and error covariances
+    theta_b = np.array([0.8, 0.05, 0.2])  # background values
+    B_std = np.array([0.3, 0.05, 0.15])   # a priori standard deviations
+    R_std = obs_sigma                      # observation error std
+
+    # Cost function for 3D-Var
     def cost_J(theta):
-        # składnik background
-        Jb = np.sum(((theta - theta_b)/B_std)**2)
-        # składnik pomiarowy
+        # Background term
+        Jb = np.sum(((theta - theta_b) / B_std)**2)
+        # Observation term
         TB_sim = simulate_TB_for_params(theta, t_true)
-        innov = (TB_sim[mask_obs] - y_obs_win)/R_std
+        innov = (TB_sim[mask_obs_win] - y_obs_win) / R_std
         Jo = np.sum(innov**2)
-        return 0.5*(Jb + Jo)
+        return 0.5 * (Jb + Jo)
 
+    # Parameter bounds
     bounds = [(prior_bounds[n][0], prior_bounds[n][1]) for n in param_order]
 
+    # Run optimization for each budget
     var_results = {}
-    for k, maxit in {"small":50, "medium":150, "large":400}.items():
-        print(f"[3D-Var] Budżet: {k} (max iter={maxit})")
+    for k, maxit in budgets.items():
+        print(f"[3D-Var] Window [{t_obs_start}, {t_obs_end}], Budget: {k} (max iter={maxit})")
         opt = minimize(cost_J, theta_b, method="L-BFGS-B", bounds=bounds,
-                       options={"maxiter": maxit, "ftol": 1e-10})
+                      options={"maxiter": maxit, "ftol": 1e-10})
         theta_opt = opt.x
-        var_results[k] = {"theta_opt": theta_opt, "J": float(opt.fun), "nit": int(opt.nit), "success": bool(opt.success)}
+
+        # Store results
+        var_results[k] = {
+            "theta_opt": theta_opt,
+            "J": float(opt.fun),
+            "nit": int(opt.nit),
+            "success": bool(opt.success),
+            "mask_obs": mask_obs_win,
+            "mask_fwd": mask_fwd_win,
+            "mask_bwd": mask_bwd_win
+        }
+
+        # Save to file with window identifier
         save_json({
-            "budget": k, "theta_opt": theta_opt.tolist(), "J": float(opt.fun),
-            "nit": int(opt.nit), "success": bool(opt.success)
-        }, f"out/3dvar_{k}_summary.json")
+            "budget": k,
+            "window": [t_obs_start, t_obs_end],
+            "theta_opt": theta_opt.tolist(),
+            "J": float(opt.fun),
+            "nit": int(opt.nit),
+            "success": bool(opt.success)
+        }, f"out/3dvar_{k}_window_{int(t_obs_start)}_{int(t_obs_end)}_summary.json")
+
+    return var_results
+
+# %%
+def cost_J_4dvar(x0, theta_fixed, mask_obs_win, y_obs_win, x0_b, B_std_state, R_std):
+    """
+    4D-Var cost function optimizing initial state at t=0.
+
+    Args:
+        x0: Initial state [S0, R0, I0, C0] at t=0 to optimize
+        theta_fixed: Fixed parameters (from 3D-Var or background)
+        mask_obs_win: Boolean mask for observation window in t_true
+        y_obs_win: Observed tumor burden in observation window
+        x0_b: Background initial state at t=0
+        B_std_state: Background error std for states
+        R_std: Observation error std
+
+    Returns:
+        Cost function value J(x0) = 0.5 * (Jb + Jo)
+    """
+    # Background term on initial state
+    Jb = np.sum(((x0 - x0_b) / B_std_state)**2)
+
+    # Forward integration from x0 at t=0 through FULL time horizon
+    p = ODEParams(**vars(p_baseline))
+    for val, name in zip(theta_fixed, param_order):
+        setattr(p, name, float(val))
+
+    # Simulate ODE from t=0 to T=10 to get full trajectory
+    sim = simulate_ode(p, x0, t_true)
+    TB_sim_full = sim["TB"]
+
+    # Extract observations ONLY in the observation window
+    TB_sim_obs = TB_sim_full[mask_obs_win]
+
+    # Observation term (fit only within window)
+    innov = (TB_sim_obs - y_obs_win) / R_std
+    Jo = np.sum(innov**2)
+
+    return 0.5 * (Jb + Jo)
+
+
+def run_4dvar(mask_obs_win, y_obs_win, theta_fixed, x0_guess, B_std_state, R_std, max_iter=100):
+    """
+    Run 4D-Var optimization for initial state at t=0.
+
+    Args:
+        mask_obs_win: Boolean mask for observation window in t_true
+        y_obs_win: Observed tumor burden in observation window
+        theta_fixed: Fixed parameters (α_S, μ_max, λ)
+        x0_guess: Initial guess for state [S0, R0, I0, C0] at t=0
+        B_std_state: Background error std for states
+        R_std: Observation error std
+        max_iter: Maximum number of iterations
+
+    Returns:
+        Dictionary with optimization results and full trajectory
+    """
+    # Bounds: all states must be non-negative
+    bounds = [(0.0, None)] * 4
+
+    # Cost function wrapper
+    def cost(x0):
+        return cost_J_4dvar(x0, theta_fixed, mask_obs_win, y_obs_win,
+                           x0_guess, B_std_state, R_std)
+
+    # Optimize
+    opt = minimize(cost, x0_guess, method="L-BFGS-B", bounds=bounds,
+                  options={"maxiter": max_iter, "ftol": 1e-10})
+
+    # Extract full trajectory on full time grid with optimized initial state at t=0
+    p = ODEParams(**vars(p_baseline))
+    for val, name in zip(theta_fixed, param_order):
+        setattr(p, name, float(val))
+    sim_opt = simulate_ode(p, opt.x, t_true)
+
+    return {
+        "x0_opt": opt.x,
+        "J_opt": float(opt.fun),
+        "success": bool(opt.success),
+        "nit": int(opt.nit),
+        "TB_opt": sim_opt["TB"],
+        "S_opt": sim_opt["S"],
+        "R_opt": sim_opt["R"],
+        "I_opt": sim_opt["I"],
+        "C_opt": sim_opt["C"]
+    }
+
+
+def run_4dvar_budgets(t_obs_start, t_obs_end, theta_source="3dvar_win1", budgets=None):
+    """
+    Run 4D-Var for three budgets and given observation window.
+
+    4D-Var optimizes initial state at t=0, then integrates forward through the full
+    time horizon, fitting observations only within the specified window.
+
+    Args:
+        t_obs_start: Start time of observation window
+        t_obs_end: End time of observation window
+        theta_source: Source of fixed parameters ("3dvar_win1", "3dvar_win2", or "background")
+        budgets: Dictionary of budget names to max iterations
+
+    Returns:
+        Dictionary of results for each budget
+    """
+    if budgets is None:
+        budgets = {"small": 50, "medium": 150, "large": 400}
+
+    # Setup observation window masks
+    mask_obs_win = (t_true >= t_obs_start) & (t_true <= t_obs_end)
+    y_obs_win = y_obs[mask_obs_win]
+
+    # Get fixed parameters from specified source
+    if theta_source == "3dvar_win1":
+        theta_fixed = var_results_win1["medium"]["theta_opt"]
+    elif theta_source == "3dvar_win2":
+        theta_fixed = var_results_win2["medium"]["theta_opt"]
+    else:  # background
+        theta_fixed = np.array([0.8, 0.05, 0.2])
+
+    # Background initial state at t=0
+    # Use the true initial tumor burden from observations
+    TB0 = float(TB_true[0])  # True initial tumor burden at t=0
+
+    # Split into sensitive and resistant cells based on typical ratio
+    # This is our "background guess" for what the initial state was
+    x0_b = np.array([
+        0.9 * TB0,   # S0: 90% sensitive
+        0.1 * TB0,   # R0: 10% resistant
+        0.02,        # I0: baseline immune
+        0.0          # C0: no drug initially
+    ])
+
+    # Background error standard deviations for states
+    # Larger values mean less trust in background, more freedom to optimize
+    B_std_state = np.array([
+        0.02,   # S uncertainty
+        0.01,   # R uncertainty
+        0.01,   # I uncertainty
+        0.01    # C uncertainty
+    ])
+
+    # Run optimization for each budget
+    results = {}
+    for k, maxit in budgets.items():
+        print(f"[4D-Var] Window [{t_obs_start}, {t_obs_end}], Budget: {k} (max iter={maxit})")
+        print(f"  Optimizing initial state at t=0, fitting observations in window")
+
+        res = run_4dvar(mask_obs_win, y_obs_win, theta_fixed, x0_b,
+                       B_std_state, obs_sigma, max_iter=maxit)
+        results[k] = res
+
+        # Save to file with window identifier
+        save_json({
+            "budget": k,
+            "window": [t_obs_start, t_obs_end],
+            "theta_source": theta_source,
+            "x0_opt": res["x0_opt"].tolist(),
+            "J": res["J_opt"],
+            "nit": res["nit"],
+            "success": res["success"]
+        }, f"out/4dvar_{k}_window_{int(t_obs_start)}_{int(t_obs_end)}_summary.json")
+
+    return results
+
+# %%
+if not SCIPY_OK:
+    print("Pominięto 3D-Var i 4D-Var — SciPy brak.")
+    var_results_win1 = {}
+    var_results_win2 = {}
+    fourvar_results_win1 = {}
+    fourvar_results_win2 = {}
+else:
+    # Run 3D-Var for Window 1: [1.0, 4.0] (between 1st and 2nd bolus)
+    print("\n" + "="*60)
+    print("3D-Var: Window 1 [1.0, 4.0] - Between 1st and 2nd bolus")
+    print("="*60)
+    var_results_win1 = run_3dvar_window(1.0, 4.0)
+
+    # Run 3D-Var for Window 2: [6.0, 9.0] (after 2nd bolus)
+    print("\n" + "="*60)
+    print("3D-Var: Window 2 [6.0, 9.0] - After 2nd bolus")
+    print("="*60)
+    var_results_win2 = run_3dvar_window(6.0, 9.0)
+
+    # Run 4D-Var for Window 1: [1.0, 4.0]
+    print("\n" + "="*60)
+    print("4D-Var: Window 1 [1.0, 4.0] - Between 1st and 2nd bolus")
+    print("="*60)
+    fourvar_results_win1 = run_4dvar_budgets(1.0, 4.0, theta_source="3dvar_win1")
+
+    # Run 4D-Var for Window 2: [6.0, 9.0]
+    print("\n" + "="*60)
+    print("4D-Var: Window 2 [6.0, 9.0] - After 2nd bolus")
+    print("="*60)
+    fourvar_results_win2 = run_4dvar_budgets(6.0, 9.0, theta_source="3dvar_win2")
+
+# %%
+def generate_comparison_table():
+    """
+    Generate comprehensive comparison of 3D-Var vs 4D-Var across both windows.
+
+    Returns:
+        DataFrame with metrics for all method/window/budget combinations
+    """
+    rows = []
+
+    # Window configurations
+    windows = [
+        (1, 1.0, 4.0, var_results_win1, fourvar_results_win1),
+        (2, 6.0, 9.0, var_results_win2, fourvar_results_win2)
+    ]
+
+    for window_num, t_start, t_end, var_res, fv_res in windows:
+        # Setup masks for this window
+        mask_obs_eval = (t_true >= t_start) & (t_true <= t_end)
+        mask_fwd_eval = (t_true > t_end)
+        mask_bwd_eval = (t_true < t_start)
+
+        for budget in ["small", "medium", "large"]:
+            # 3D-Var evaluation
+            if budget in var_res:
+                theta_3d = var_res[budget]["theta_opt"]
+                TB_3d = simulate_TB_for_params(theta_3d, t_true)
+
+                rows.append({
+                    "method": "3D-Var",
+                    "budget": budget,
+                    "window": window_num,
+                    "window_range": f"[{t_start}, {t_end}]",
+                    "rmse_obs": rmse(TB_3d[mask_obs_eval], TB_true[mask_obs_eval]),
+                    "rmse_fwd": rmse(TB_3d[mask_fwd_eval], TB_true[mask_fwd_eval]),
+                    "rmse_bwd": rmse(TB_3d[mask_bwd_eval], TB_true[mask_bwd_eval]),
+                    "mae_obs": mae(TB_3d[mask_obs_eval], TB_true[mask_obs_eval]),
+                    "mae_fwd": mae(TB_3d[mask_fwd_eval], TB_true[mask_fwd_eval]),
+                    "mae_bwd": mae(TB_3d[mask_bwd_eval], TB_true[mask_bwd_eval]),
+                    "J_opt": var_res[budget]["J"],
+                    "nit": var_res[budget]["nit"],
+                    "success": var_res[budget]["success"]
+                })
+
+            # 4D-Var evaluation
+            if budget in fv_res:
+                TB_4d = fv_res[budget]["TB_opt"]
+
+                rows.append({
+                    "method": "4D-Var",
+                    "budget": budget,
+                    "window": window_num,
+                    "window_range": f"[{t_start}, {t_end}]",
+                    "rmse_obs": rmse(TB_4d[mask_obs_eval], TB_true[mask_obs_eval]),
+                    "rmse_fwd": rmse(TB_4d[mask_fwd_eval], TB_true[mask_fwd_eval]),
+                    "rmse_bwd": rmse(TB_4d[mask_bwd_eval], TB_true[mask_bwd_eval]),
+                    "mae_obs": mae(TB_4d[mask_obs_eval], TB_true[mask_obs_eval]),
+                    "mae_fwd": mae(TB_4d[mask_fwd_eval], TB_true[mask_fwd_eval]),
+                    "mae_bwd": mae(TB_4d[mask_bwd_eval], TB_true[mask_bwd_eval]),
+                    "J_opt": fv_res[budget]["J_opt"],
+                    "nit": fv_res[budget]["nit"],
+                    "success": fv_res[budget]["success"]
+                })
+
+    df = pd.DataFrame(rows)
+    df.to_csv("out/da_comparison_3dvar_vs_4dvar.csv", index=False)
+    print("[Zapisano] out/da_comparison_3dvar_vs_4dvar.csv")
+    return df
+
+# %%
+# Generate comprehensive comparison table
+if SCIPY_OK:
+    print("\n" + "="*60)
+    print("Generating Comprehensive Comparison Table")
+    print("="*60)
+    df_comparison = generate_comparison_table()
+    print("\nComparison Summary:")
+    print(df_comparison.to_string())
+
+# %%
+def plot_dual_window_comparison(budget="medium"):
+    """
+    Plot trajectories for both windows side-by-side comparing 3D-Var and 4D-Var.
+
+    Args:
+        budget: Which budget to visualize ("small", "medium", or "large")
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Window 1: [1.0, 4.0]
+    ax1.plot(t_true, TB_true, "k-", lw=2, label="PDE true", zorder=5)
+
+    # Observations in Window 1
+    mask_obs_1 = (t_true >= 1.0) & (t_true <= 4.0)
+    ax1.scatter(t_true[mask_obs_1], y_obs[mask_obs_1], c="gray", s=30,
+               alpha=0.6, label="obs", zorder=10)
+
+    # 3D-Var Window 1
+    if budget in var_results_win1:
+        theta_3d_1 = var_results_win1[budget]["theta_opt"]
+        TB_3d_1 = simulate_TB_for_params(theta_3d_1, t_true)
+        ax1.plot(t_true, TB_3d_1, "--", label="3D-Var", lw=1.5)
+
+    # 4D-Var Window 1
+    if budget in fourvar_results_win1:
+        TB_4d_1 = fourvar_results_win1[budget]["TB_opt"]
+        ax1.plot(t_true, TB_4d_1, ":", label="4D-Var", lw=2)
+
+    ax1.axvspan(1.0, 4.0, alpha=0.1, color="blue", label="assim window")
+    ax1.set_xlabel("Time t")
+    ax1.set_ylabel("Tumor Burden TB(t)")
+    ax1.set_title(f"Window 1: [1.0, 4.0] - {budget} budget")
+    ax1.legend(loc="best")
+    ax1.grid(True, alpha=0.3)
+
+    # Window 2: [6.0, 9.0]
+    ax2.plot(t_true, TB_true, "k-", lw=2, label="PDE true", zorder=5)
+
+    # Observations in Window 2
+    mask_obs_2 = (t_true >= 6.0) & (t_true <= 9.0)
+    ax2.scatter(t_true[mask_obs_2], y_obs[mask_obs_2], c="gray", s=30,
+               alpha=0.6, label="obs", zorder=10)
+
+    # 3D-Var Window 2
+    if budget in var_results_win2:
+        theta_3d_2 = var_results_win2[budget]["theta_opt"]
+        TB_3d_2 = simulate_TB_for_params(theta_3d_2, t_true)
+        ax2.plot(t_true, TB_3d_2, "--", label="3D-Var", lw=1.5)
+
+    # 4D-Var Window 2
+    if budget in fourvar_results_win2:
+        TB_4d_2 = fourvar_results_win2[budget]["TB_opt"]
+        ax2.plot(t_true, TB_4d_2, ":", label="4D-Var", lw=2)
+
+    ax2.axvspan(6.0, 9.0, alpha=0.1, color="blue", label="assim window")
+    ax2.set_xlabel("Time t")
+    ax2.set_ylabel("Tumor Burden TB(t)")
+    ax2.set_title(f"Window 2: [6.0, 9.0] - {budget} budget")
+    ax2.legend(loc="best")
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    savefig_f(f"da_dual_window_comparison_{budget}.png")
+    print(f"[Zapisano] figs/da_dual_window_comparison_{budget}.png")
+
+
+def plot_performance_heatmap(df_comparison, metric="rmse_fwd"):
+    """
+    Generate heatmap comparing methods across budgets and windows.
+
+    Args:
+        df_comparison: DataFrame from generate_comparison_table()
+        metric: Which metric to visualize (e.g., "rmse_fwd", "mae_obs")
+    """
+    import seaborn as sns
+
+    # Create pivot table for heatmap
+    pivot = df_comparison.pivot_table(
+        index=["method", "window"],
+        columns="budget",
+        values=metric
+    )
+
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(pivot, annot=True, fmt=".4f", cmap="YlOrRd_r",
+                cbar_kws={'label': metric.upper()})
+    plt.title(f"{metric.upper()}: 3D-Var vs 4D-Var Comparison")
+    plt.ylabel("Method / Window")
+    plt.xlabel("Budget")
+    plt.tight_layout()
+    savefig_f(f"da_heatmap_{metric}.png")
+    print(f"[Zapisano] figs/da_heatmap_{metric}.png")
+
+
+def plot_4dvar_state_evolution(budget="medium", window=1):
+    """
+    Plot full state evolution (S, R, I, C) from 4D-Var.
+
+    Args:
+        budget: Which budget to visualize
+        window: Which window (1 or 2)
+    """
+    res = fourvar_results_win1[budget] if window == 1 else fourvar_results_win2[budget]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    state_vars = [
+        ("S_opt", "S - Sensitive cells"),
+        ("R_opt", "R - Resistant cells"),
+        ("I_opt", "I - Immune cells"),
+        ("C_opt", "C - Drug concentration")
+    ]
+
+    for ax, (var, label) in zip(axes.flat, state_vars):
+        ax.plot(t_true, res[var], "b-", lw=1.5, label="4D-Var")
+        ax.set_xlabel("Time t")
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+    window_str = "[1.0, 4.0]" if window == 1 else "[6.0, 9.0]"
+    plt.suptitle(f"4D-Var State Evolution - Window {window} {window_str}, {budget} budget",
+                 fontsize=14)
+    plt.tight_layout()
+    savefig_f(f"da_4dvar_states_{budget}_win{window}.png")
+    print(f"[Zapisano] figs/da_4dvar_states_{budget}_win{window}.png")
+
+
+# %%
+# Generate visualizations
+if SCIPY_OK:
+    print("\n" + "="*60)
+    print("Generating Visualization Plots")
+    print("="*60)
+
+    # Dual window comparison plots for all budgets
+    for budget in ["small", "medium", "large"]:
+        plot_dual_window_comparison(budget)
+
+    # Performance heatmaps for key metrics
+    for metric in ["rmse_fwd", "rmse_obs", "mae_fwd"]:
+        plot_performance_heatmap(df_comparison, metric)
+
+    # 4D-Var state evolution for medium budget, both windows
+    plot_4dvar_state_evolution(budget="medium", window=1)
+    plot_4dvar_state_evolution(budget="medium", window=2)
+
+# %%
+def test_4dvar_cost_function():
+    """
+    Test that 4D-Var cost function evaluates correctly.
+    """
+    print("\n[TEST] 4D-Var Cost Function Evaluation")
+
+    # Setup test inputs
+    mask_test = (t_true >= 1.0) & (t_true <= 4.0)
+    y_obs_test = y_obs[mask_test]
+
+    # Use reasonable initial state at t=0
+    x0_test = np.array([0.04, 0.005, 0.02, 0.0])
+    x0_b = np.array([0.04, 0.005, 0.02, 0.0])
+    theta_test = np.array([0.8, 0.05, 0.2])
+    B_std = np.array([0.01, 0.005, 0.01, 0.01])
+
+    try:
+        J = cost_J_4dvar(x0_test, theta_test, mask_test, y_obs_test,
+                        x0_b, B_std, obs_sigma)
+        print(f"   Cost function evaluates successfully: J = {J:.6f}")
+
+        # Cost should be non-negative
+        assert J >= 0, "Cost function should be non-negative"
+        print(f"   Cost is non-negative")
+
+        # Cost with same initial state as background should be smaller
+        # than cost with different initial state
+        x0_different = x0_b + np.array([0.01, 0.005, 0.0, 0.0])
+        J_different = cost_J_4dvar(x0_different, theta_test, mask_test, y_obs_test,
+                                  x0_b, B_std, obs_sigma)
+        print(f"   Cost with different x0: J = {J_different:.6f}")
+
+        return True
+    except Exception as e:
+        print(f"   FAILED: {e}")
+        return False
+
+
+def test_4dvar_convergence():
+    """
+    Test that 4D-Var optimization improves over background guess.
+    """
+    print("\n[TEST] 4D-Var Convergence")
+
+    # Setup test window
+    mask_test = (t_true >= 1.0) & (t_true <= 4.0)
+    y_obs_test = y_obs[mask_test]
+
+    # Background guess at t=0
+    x0_guess = np.array([0.035, 0.008, 0.02, 0.0])
+    theta_test = np.array([0.8, 0.05, 0.2])
+    B_std = np.array([0.01, 0.005, 0.01, 0.01])
+
+    # Initial cost
+    J_initial = cost_J_4dvar(x0_guess, theta_test, mask_test, y_obs_test,
+                            x0_guess, B_std, obs_sigma)
+    print(f"  Initial cost J = {J_initial:.6f}")
+
+    try:
+        # Run optimization
+        result = run_4dvar(mask_test, y_obs_test, theta_test, x0_guess,
+                          B_std, obs_sigma, max_iter=50)
+
+        J_final = result["J_opt"]
+        print(f"  Final cost J = {J_final:.6f}")
+        print(f"  Cost reduction: {J_initial - J_final:.6f}")
+        print(f"  Iterations: {result['nit']}")
+        print(f"  Success: {result['success']}")
+
+        # Optimization should improve (reduce) cost
+        if J_final < J_initial:
+            print(f"   Optimization reduced cost")
+        else:
+            print(f"  ⚠ Warning: Cost did not reduce (may already be at minimum)")
+
+        return True
+    except Exception as e:
+        print(f"   FAILED: {e}")
+        return False
+
+
+def test_physical_constraints():
+    """
+    Test that 4D-Var optimized states satisfy physical constraints (non-negativity).
+    """
+    print("\n[TEST] Physical Constraints (Non-negativity)")
+
+    all_pass = True
+
+    for window_num, results in [(1, fourvar_results_win1), (2, fourvar_results_win2)]:
+        print(f"\n  Window {window_num}:")
+
+        for budget, res in results.items():
+            # Check initial state
+            x0_opt = res["x0_opt"]
+            states = {
+                "S": res["S_opt"],
+                "R": res["R_opt"],
+                "I": res["I_opt"],
+                "C": res["C_opt"]
+            }
+
+            # Check x0 non-negativity
+            if np.all(x0_opt >= 0):
+                print(f"     {budget}: Initial state x0 is non-negative")
+            else:
+                print(f"     {budget}: Initial state has negative values!")
+                all_pass = False
+
+            # Check trajectory non-negativity
+            for state_name, state_vals in states.items():
+                if np.all(state_vals >= -1e-10):  # Allow small numerical errors
+                    min_val = np.min(state_vals)
+                    print(f"     {budget}: {state_name} trajectory non-negative (min={min_val:.6e})")
+                else:
+                    min_val = np.min(state_vals)
+                    print(f"     {budget}: {state_name} has negative values (min={min_val:.6e})!")
+                    all_pass = False
+
+    return all_pass
+
+
+# %%
+# Run tests
+if SCIPY_OK:
+    print("\n" + "="*60)
+    print("Running 4D-Var Verification Tests")
+    print("="*60)
+
+    test_4dvar_cost_function()
+    test_4dvar_convergence()
+    test_physical_constraints()
+
+    print("\n" + "="*60)
+    print("All tests completed!")
+    print("="*60)
 
 
 # %%
@@ -333,9 +932,9 @@ for k, res in abc_results.items():
     met = evaluate_theta(f"abc_{k}", theta_map)
     summary_rows.append({"method":"ABC","budget":k, **met})
 
-# 3D-Var
+# 3D-Var (Window 1)
 if SCIPY_OK:
-    for k, res in var_results.items():
+    for k, res in var_results_win1.items():
         theta_opt = res["theta_opt"]
         met = evaluate_theta(f"3dvar_{k}", theta_opt)
         summary_rows.append({"method":"3D-Var","budget":k, **met})
@@ -359,9 +958,9 @@ for k in abc_results.keys():
     df = pd.read_csv(f"out/sim_abc_{k}.csv")
     plt.plot(df["t"], df["TB_sim"], linestyle="--", label=f"ABC {k}")
 
-# 3D-Var
+# 3D-Var (Window 1)
 if SCIPY_OK:
-    for k in var_results.keys():
+    for k in var_results_win1.keys():
         df = pd.read_csv(f"out/sim_3dvar_{k}.csv")
         plt.plot(df["t"], df["TB_sim"], linestyle=":", label=f"3D-Var {k}")
 

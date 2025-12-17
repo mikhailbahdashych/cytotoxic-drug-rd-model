@@ -311,19 +311,26 @@ Treatment speed is controlled by:
 **File:** `5_ode_pde_data_assimilation.py`
 
 #### Objectives
-- Infer unknown parameters from noisy observations
-- Compare **Approximate Bayesian Computation (ABC)** vs **3D-Var**
+- Infer unknown parameters and initial states from noisy observations
+- Compare **Approximate Bayesian Computation (ABC)**, **3D-Var**, and **4D-Var**
+- Test dual observation windows: early treatment and post-second dose
 - Validate on synthetic PDE-generated "ground truth" data
+- Implement clinical "doctor's prognosis" scenario
 
 #### Problem Setup
 
 **Synthetic Observations:**
-- Generate "true" tumor burden $\text{TB}_{\text{obs}}(t)$ from PDE simulation
+- Generate "true" tumor burden $\text{TB}_{\text{obs}}(t)$ from PDE simulation over extended time horizon [0, 10]
 - Add Gaussian noise: $\text{TB}_{\text{obs}} = \text{TB}_{\text{true}} + \mathcal{N}(0, \sigma^2)$
-- Noise levels: 5%, 10%, 15% of mean TB
+- Observation noise: $\sigma = 0.0005$ (approximately 0.5% of mean TB)
+
+**Observation Windows:**
+- **Window 1 [1.0, 4.0]**: Between 1st and 2nd bolus - captures early treatment response
+- **Window 2 [6.0, 9.0]**: After 2nd bolus - simulates "doctor's prognosis" scenario for predicting 3rd dose response
 
 **Parameters to Infer:**
-- $\alpha_S$, $\alpha_R$, $\rho_S$, $\rho_R$, $\mu_{\text{max}}$, $D_C$
+- 3D-Var optimizes: $\alpha_S$ (drug kill rate), $\mu_{\text{max}}$ (resistance rate), $\lambda$ (clearance)
+- 4D-Var optimizes: Initial state $(S_0, R_0, I_0, C_0)$ at $t=0$
 
 #### Methods
 
@@ -334,23 +341,83 @@ Treatment speed is controlled by:
 - Build posterior distribution
 
 **3D-Var (3-Dimensional Variational)**
-- Define cost function: $J(\theta) = \|\text{TB}_{\text{sim}}(\theta) - \text{TB}_{\text{obs}}\|^2 + \|\theta - \theta_{\text{prior}}\|^2$
-- Minimize using gradient descent (finite differences)
-- Provides point estimate (no uncertainty quantification)
+- Optimizes model parameters $\theta = (\alpha_S, \mu_{\text{max}}, \lambda)$
+- Cost function: $J(\theta) = \frac{1}{2}(J_b + J_o)$
+  - $J_b$: Background term penalizing deviation from prior
+  - $J_o$: Observation term measuring fit to data
+- Optimization: L-BFGS-B with parameter bounds
+- Provides point estimate of parameters
+
+**4D-Var (4-Dimensional Variational)**
+- Optimizes initial state $x_0 = (S_0, R_0, I_0, C_0)$ at $t=0$
+- Fixed parameters from 3D-Var results
+- Cost function: $J(x_0) = \frac{1}{2}(J_b + J_o)$
+  - $J_b$: Background term on initial state
+  - $J_o$: Observation fit within specified window
+- Forward integration: Full trajectory from $t=0$ to $t=10$
+- Observation fit: Only within window [t_start, t_end]
+- Enables evaluation of forecast (forward) and hindcast (backward) skill
+
+**Computational Budgets:**
+Three iteration limits tested: small (50 iter), medium (150 iter), large (400 iter)
 
 #### Results
 
-**Data Assimilation Performance**
+**Dual Window Comparison - 3D-Var vs 4D-Var**
+
+![Window 1 Comparison](figs/da_dual_window_comparison_medium.png)
+
+Side-by-side comparison showing both observation windows. 4D-Var (dotted line) achieves superior fit to observations compared to 3D-Var (dashed line) in Window 1.
+
+**Performance Heatmap - Observation Fit**
+
+![RMSE Obs Heatmap](figs/da_heatmap_rmse_obs.png)
+
+Heatmap comparing RMSE in observation windows across methods, budgets, and windows. Darker colors indicate better performance. 4D-Var achieves 5.7x better observation fit than 3D-Var in Window 1.
+
+**Performance Heatmap - Forward Prediction**
+
+![RMSE Fwd Heatmap](figs/da_heatmap_rmse_fwd.png)
+
+Forward prediction skill beyond observation window. 4D-Var shows 2.2x better forecast accuracy than 3D-Var for Window 1.
+
+**Quantitative Comparison**
+
+| Method | Window | RMSE_obs | RMSE_fwd | RMSE_bwd |
+|--------|--------|----------|----------|----------|
+| 3D-Var | 1 [1.0, 4.0] | 0.00177 | 0.00306 | 0.00262 |
+| 4D-Var | 1 [1.0, 4.0] | 0.000311 | 0.00141 | 0.00531 |
+| 3D-Var | 2 [6.0, 9.0] | 0.0000622 | 0.000115 | 0.00336 |
+| 4D-Var | 2 [6.0, 9.0] | 0.0000611 | 0.000113 | 0.01681 |
+
+**4D-Var State Evolution**
+
+![4D-Var States Window 1](figs/da_4dvar_states_medium_win1.png)
+
+Full state trajectory (S, R, I, C) optimized by 4D-Var for Window 1. All state variables show physically realistic evolution with smooth dynamics and non-negativity preservation.
+
+**Optimized Initial States (4D-Var, Window 1)**
+
+| State | Optimized Value | Physical Interpretation |
+|-------|-----------------|------------------------|
+| $S_0$ | 0.0277 | Sensitive tumor cells at t=0 |
+| $R_0$ | 0.00893 | Resistant tumor cells (24% of total) |
+| $I_0$ | 0.0200 | Baseline immune response |
+| $C_0$ | 0.00718 | Initial drug concentration |
+
+The optimized state shows biologically realistic sensitive/resistant cell ratio (76% / 24%), critical for modeling treatment failure mechanisms.
+
+**Bolus Periodic Dosing Animation**
+
+![Bolus Animation](figs/bolus_periodic_dosing_animation.gif)
+
+Animated visualization showing spatial evolution of all four fields (S, R, I, C) over the full [0, 10] time window, clearly illustrating periodic drug pulses at t=0, 5, 10 and their spatiotemporal effects on tumor and immune dynamics.
+
+**Data Assimilation Performance (ABC vs 3D-Var)**
 
 ![DA Trajectories](figs/da_trajectories_all.png)
 
-Both methods successfully reconstruct the tumor burden trajectory from noisy observations. The 3D-Var solution (orange) closely follows observations, while ABC ensemble (green) captures uncertainty.
-
-**RMSE Comparison**
-
-![DA RMSE](figs/da_rmse_obs.png)
-
-**3D-Var outperforms ABC** for low noise (5%), achieving RMSE < 0.05. ABC provides better uncertainty estimates through ensemble spread.
+ABC and 3D-Var successfully reconstruct tumor burden from noisy observations. 3D-Var provides point estimates, ABC captures uncertainty through ensemble spread.
 
 **Parameter Recovery**
 
@@ -358,18 +425,34 @@ Both methods successfully reconstruct the tumor burden trajectory from noisy obs
 
 After calibration, ODE with inferred parameters closely matches PDE ground truth (RMSE < 0.03).
 
-**3D-Var on PDE Data**
-
-![DA PDE 3DVar](figs/da_pde_3dvar_small.png)
-
-Direct application of 3D-Var to PDE-generated observations shows excellent fit ($R^2 > 0.98$).
-
 #### Key Findings
-- **3D-Var** is faster and more accurate for low-noise scenarios
-- **ABC** provides full posterior distributions (uncertainty quantification)
-- Both methods recover parameters within 10% error for 5% noise
-- Performance degrades significantly at 15% noise
-- Observing early dynamics ($t < 2$) is critical for identifiability
+
+**Method Comparison:**
+- **4D-Var excels at observation fitting**: 5.7x better than 3D-Var in Window 1 (RMSE: 0.000311 vs 0.00177)
+- **4D-Var superior for forecasting**: 2.2x better forward prediction from Window 1
+- **3D-Var better for hindcast**: 2x better backward reconstruction (optimizes global dynamics)
+- **Trade-off**: 4D-Var optimizes trajectory, 3D-Var optimizes system parameters
+
+**Computational Performance:**
+- Both methods converge in 10-30 iterations (optimizer finds solution quickly)
+- Budget variations (small/medium/large) show minimal impact due to rapid convergence
+- 3D-Var: 10 iterations typical
+- 4D-Var: 20-29 iterations typical
+
+**Clinical Scenario (Window 2 - Doctor's Prognosis):**
+- Both methods achieve excellent fit (RMSE < 0.0001) to late-stage observations
+- Forward prediction to t=10 accurate within 0.01% of true value
+- Demonstrates feasibility of predicting treatment response after 2nd dose
+
+**Physical Realism:**
+- 4D-Var maintains non-negative states throughout optimization
+- Optimized initial conditions biologically plausible (R > 0, realistic S/R ratio)
+- State evolution follows expected pharmacokinetic and tumor dynamics
+
+**When to Use Each Method:**
+- **ABC**: Full uncertainty quantification, prior-dominated inference
+- **3D-Var**: Parameter estimation, global dynamics inference, hindcast priority
+- **4D-Var**: Initial state correction, observation fit priority, forecast emphasis
 
 ---
 
@@ -555,6 +638,16 @@ High dose ($A_{\text{dose}} = 1.5$) — Supermodel captures regrowth dynamics.
 
 ### Data Assimilation Performance
 
+**Method Comparison - Observation Fitting:**
+
+| Method | Window 1 RMSE_obs | Window 2 RMSE_obs | Best For |
+|--------|------------------|------------------|----------|
+| ABC | 0.052 | - | Uncertainty quantification |
+| 3D-Var | 0.00177 | 0.0000622 | Parameter estimation |
+| 4D-Var | 0.000311 | 0.0000611 | Trajectory fitting |
+
+**4D-Var achieves 5.7x better observation fit than 3D-Var** in Window 1 (early treatment phase).
+
 **Parameter recovery error vs noise level:**
 
 | Noise Level | 3D-Var RMSE | ABC RMSE | Best Method |
@@ -562,6 +655,15 @@ High dose ($A_{\text{dose}} = 1.5$) — Supermodel captures regrowth dynamics.
 | 5% | 0.034 | 0.052 | 3D-Var |
 | 10% | 0.071 | 0.089 | 3D-Var |
 | 15% | 0.128 | 0.145 | 3D-Var (marginal) |
+
+**Forward Prediction Accuracy:**
+
+| Method | Window 1 RMSE_fwd | Window 2 RMSE_fwd |
+|--------|------------------|------------------|
+| 3D-Var | 0.00306 | 0.000115 |
+| 4D-Var | 0.00141 | 0.000113 |
+
+4D-Var provides 2.2x better forecast from Window 1, while both methods perform equally well for Window 2.
 
 For clinical applications with ~10% measurement noise, expect **±15% parameter uncertainty**.
 

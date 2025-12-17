@@ -243,7 +243,7 @@ def simulate_ode(p: ODEParams, y0, t_grid):
 # TODO: Dostosuj do swoich istniejących danych lub użyj symulacji PDE.
 
 # %%
-def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit", high_resolution=True):
+def load_or_generate_pde_reference(T=10.0, N=64, solver="semi_implicit", high_resolution=True):
     """
     Wczytuje lub generuje trajektorię TB(t) z PDE.
 
@@ -312,7 +312,7 @@ def load_or_generate_pde_reference(T=6.0, N=64, solver="semi_implicit", high_res
     else:
         raise RuntimeError("Nie można wczytać ani wygenerować danych PDE")
 
-pde_ref = load_or_generate_pde_reference(T=6.0, N=64)
+pde_ref = load_or_generate_pde_reference(T=10.0, N=64)
 t_pde = pde_ref["t"]
 TB_pde = pde_ref["TB"]
 
@@ -808,7 +808,7 @@ class SuperNet(nn.Module):
 # Każda wartość odpowiada innej intensywności terapii.
 
 # %%
-def generate_pde_data_for_dose(p_dose, T=6.0, N=64, base_infusion=0.15):
+def generate_pde_data_for_dose(p_dose, T=10.0, N=64, base_infusion=0.15):
     """
     Generuje dane PDE dla danej wartości p_dose.
     p_dose - skalar skalujący infusion_rate (0.5 = słaba, 1.0 = nominalna, 1.5 = silna)
@@ -862,7 +862,7 @@ pde_data_scenarios = {}
 print("\n[SuperNet] Generowanie danych PDE dla różnych scenariuszy...")
 for p_dose in dose_scenarios:
     print(f"  Scenariusz p_dose = {p_dose}...")
-    pde_data_scenarios[p_dose] = generate_pde_data_for_dose(p_dose, T=6.0, N=64)
+    pde_data_scenarios[p_dose] = generate_pde_data_for_dose(p_dose, T=10.0, N=64)
     print(f"    -> TB(T={pde_data_scenarios[p_dose]['t'][-1]:.2f}) = "
           f"{pde_data_scenarios[p_dose]['TB'][-1]:.4f}")
 
