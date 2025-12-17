@@ -606,7 +606,7 @@ plot_param_curve(rows, "mu_max", "figs/param_mu_tb.png")
 # stała siatka i parametry; identyczny T i save_every
 grid_cmp = Grid(Nx=96, Ny=96, Lx=1.0, Ly=1.0)
 
-def compare_solvers_once(grid, p, T=6.0):
+def compare_solvers_once(grid, p, T=10.0):
     out = {}
     for solver in ["explicit"] + (["semi_implicit"] if SCIPY_AVAILABLE else []):
         # Dla explicit używamy większej wartości save_every, żeby mieć podobne odstępy czasowe jak semi_implicit
@@ -736,7 +736,7 @@ def compare_solvers_once(grid, p, T=6.0):
 
     return out
 
-comparison = compare_solvers_once(grid_cmp, p, T=6.0)
+comparison = compare_solvers_once(grid_cmp, p, T=10.0)
 
 # wspólny wykres TB
 plt.figure(figsize=(6.0,4.2))
@@ -751,6 +751,140 @@ plt.legend()
 savefig("figs/compare_solvers_tb.png")
 plt.show()
 
+# %%
+def generate_bolus_animation():
+    """
+    Generate GIF animation showing bolus periodic dosing over full [0, 10] time window.
+    Shows all 4 fields (S, R, I, C) in 2×2 layout to visualize drug pulses and tumor response.
+    """
+    print("\n" + "="*60)
+    print("Generating Bolus Dosing Animation")
+    print("="*60)
+
+    # Setup grid and parameters for bolus animation
+    grid_bolus = Grid(Nx=96, Ny=96, Lx=1.0, Ly=1.0)
+    p_bolus = Params(**asdict(p))  # Use default parameters with bolus dosing
+
+    # Choose solver (prefer semi_implicit for better stability)
+    solver = "semi_implicit" if SCIPY_AVAILABLE else "explicit"
+
+    # Adjust save_every to get good temporal resolution for animation
+    # We want to capture the bolus pulses at t=0, 5, 10 and the dynamics in between
+    if solver == "semi_implicit":
+        save_every_val = 15  # With dt~0.02, this gives frames every ~0.3 time units
+    else:
+        save_every_val = 300  # With dt~0.001, this gives frames every ~0.3 time units
+
+    print(f"Running {solver} simulation with T=10.0 to capture 3 bolus doses...")
+    print(f"Bolus doses at t=0, 5, 10 with dose_period={p_bolus.dose_period}")
+
+    # Run simulation with snapshot saving enabled
+    result = run_simulation(
+        solver_name=solver,
+        grid=grid_bolus,
+        p=p_bolus,
+        T=10.0,
+        dt=None,
+        save_every=save_every_val,
+        theta=0.5,
+        save_snapshots=True
+    )
+
+    (S, R, I, C), traj, info, snapshots = result
+    print(f"Simulation complete: {len(snapshots)} frames, dt={info['dt']:.6f}")
+
+    # Check if PIL is available for GIF creation
+    try:
+        from PIL import Image
+        PIL_AVAILABLE = True
+    except:
+        PIL_AVAILABLE = False
+        print("  Uwaga: Pillow niedostępny — GIF nie zostanie utworzony")
+        print("  Aby zainstalować: pip install pillow")
+        return
+
+    if PIL_AVAILABLE:
+        frames = []
+
+        # Determine color ranges for consistency across all frames
+        vmin_S, vmax_S = 0, max([s["S"].max() for s in snapshots])
+        vmin_R, vmax_R = 0, max([s["R"].max() for s in snapshots])
+        vmin_I, vmax_I = 0, max([s["I"].max() for s in snapshots])
+        vmin_C, vmax_C = 0, max([s["C"].max() for s in snapshots])
+
+        print(f"Creating animation frames...")
+        for idx, snap in enumerate(snapshots):
+            if idx % 5 == 0:
+                print(f"  Frame {idx+1}/{len(snapshots)}: t={snap['t']:.2f}")
+
+            # Create 2×2 panel figure
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle(f"Bolus Periodic Dosing — t = {snap['t']:.2f}",
+                        fontsize=16, fontweight='bold')
+
+            # S - Sensitive cells (upper left)
+            im0 = axes[0,0].imshow(snap["S"].T, origin="lower",
+                                  extent=[0, grid_bolus.Lx, 0, grid_bolus.Ly],
+                                  aspect="equal", vmin=vmin_S, vmax=vmax_S,
+                                  cmap='viridis')
+            axes[0,0].set_title("S - Sensitive Cells", fontsize=12, fontweight='bold')
+            axes[0,0].set_xlabel("x")
+            axes[0,0].set_ylabel("y")
+            plt.colorbar(im0, ax=axes[0,0], fraction=0.046, pad=0.04)
+
+            # R - Resistant cells (upper right)
+            im1 = axes[0,1].imshow(snap["R"].T, origin="lower",
+                                  extent=[0, grid_bolus.Lx, 0, grid_bolus.Ly],
+                                  aspect="equal", vmin=vmin_R, vmax=vmax_R,
+                                  cmap='plasma')
+            axes[0,1].set_title("R - Resistant Cells", fontsize=12, fontweight='bold')
+            axes[0,1].set_xlabel("x")
+            axes[0,1].set_ylabel("y")
+            plt.colorbar(im1, ax=axes[0,1], fraction=0.046, pad=0.04)
+
+            # I - Immune response (lower left)
+            im2 = axes[1,0].imshow(snap["I"].T, origin="lower",
+                                  extent=[0, grid_bolus.Lx, 0, grid_bolus.Ly],
+                                  aspect="equal", vmin=vmin_I, vmax=vmax_I,
+                                  cmap='cividis')
+            axes[1,0].set_title("I - Immune Response", fontsize=12, fontweight='bold')
+            axes[1,0].set_xlabel("x")
+            axes[1,0].set_ylabel("y")
+            plt.colorbar(im2, ax=axes[1,0], fraction=0.046, pad=0.04)
+
+            # C - Drug concentration (lower right)
+            im3 = axes[1,1].imshow(snap["C"].T, origin="lower",
+                                  extent=[0, grid_bolus.Lx, 0, grid_bolus.Ly],
+                                  aspect="equal", vmin=vmin_C, vmax=vmax_C,
+                                  cmap='hot')
+            axes[1,1].set_title("C - Drug Concentration", fontsize=12, fontweight='bold')
+            axes[1,1].set_xlabel("x")
+            axes[1,1].set_ylabel("y")
+            plt.colorbar(im3, ax=axes[1,1], fraction=0.046, pad=0.04)
+
+            plt.tight_layout()
+
+            # Convert figure to image frame
+            fig.canvas.draw()
+            buf = fig.canvas.buffer_rgba()
+            img = Image.frombuffer('RGBA', fig.canvas.get_width_height(),
+                                  buf, 'raw', 'RGBA', 0, 1)
+            img = img.convert('RGB')
+            frames.append(img)
+            plt.close(fig)
+
+        # Save GIF animation
+        gif_path = "figs/bolus_periodic_dosing_animation.gif"
+        print(f"\nSaving GIF animation...")
+        frames[0].save(gif_path, save_all=True, append_images=frames[1:],
+                      duration=200, loop=0)  # 200ms per frame, infinite loop
+        print(f"[Zapisano] {gif_path}")
+        print(f"Animation contains {len(frames)} frames showing bolus doses at t=0, 5, 10")
+        print("="*60)
+
+# Generate the bolus animation
+generate_bolus_animation()
+
 # %% [markdown]
 # ### Główna pętla symulacji i zapisy wyników
 # 
@@ -761,7 +895,7 @@ plt.show()
 grid_cmp = Grid(Nx=96, Ny=96, Lx=1.0, Ly=1.0)
 p_cmp = Params(**asdict(p))
 
-T = 6.0
+T = 10.0  # Extended to cover three bolus doses (t=0, 5, 10)
 dt_same = 5e-3  # wspólny krok dla obu solverów (stabilny dla semi_implicit, akceptowalny dla explicit)
 (S1, R1, I1, C1), traj1, info1 = run_simulation("explicit", grid_cmp, p_cmp, T=T, dt=dt_same, save_every=20, theta=0.5)
 (S2, R2, I2, C2), traj2, info2 = run_simulation("semi_implicit", grid_cmp, p_cmp, T=T, dt=dt_same, save_every=20, theta=0.5)
@@ -930,7 +1064,7 @@ for pname, vals in extreme_sets.items():
     for tag, val in zip(["LO","HI"], vals):
         p_ext = Params(**asdict(p))
         setattr(p_ext, pname, val)
-        (S, R, I, C), traj, info = run_simulation("semi_implicit", grid_ext, p_ext, T=6.0, dt=None, save_every=999, theta=0.5)
+        (S, R, I, C), traj, info = run_simulation("semi_implicit", grid_ext, p_ext, T=10.0, dt=None, save_every=999, theta=0.5)
         TBf = float(((S+R).sum())*grid_ext.dx*grid_ext.dy)
         rows_ext.append({"param":pname,"tag":tag,"value":val,"TB_final":TBf,"time_sec":info["time_sec"]})
         print(f"{pname}={val} [{tag}] -> TB_final={TBf:.5f}, time={info['time_sec']:.2f}s")
@@ -983,7 +1117,7 @@ except NameError:
     grid_cmp2 = Grid(Nx=96, Ny=96, Lx=1.0, Ly=1.0)
     comparison = {}
     for solver in ["explicit"] + (["semi_implicit"] if SCIPY_AVAILABLE else []):
-        (S, R, I, C), traj, info = run_simulation(solver, grid_cmp2, p, T=6.0, dt=None, save_every=20, theta=0.5)
+        (S, R, I, C), traj, info = run_simulation(solver, grid_cmp2, p, T=10.0, dt=None, save_every=20, theta=0.5)
         comparison[solver] = {"S":S,"R":R,"I":I,"C":C,"traj":traj,"info":info,"grid":grid_cmp2}
 
 for solver, pack in comparison.items():

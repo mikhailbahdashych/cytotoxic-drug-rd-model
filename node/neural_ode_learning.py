@@ -154,7 +154,7 @@ def mae(pred, true):
 # ## Section 2: Data Generation from PDE
 
 # %%
-def run_pde_simulation_for_node(grid, params, T=6.0, dt=0.01, save_every=10, custom_init=None):
+def run_pde_simulation_for_node(grid, params, T=10.0, dt=0.01, save_every=10, custom_init=None):
     """
     Run PDE simulation and extract spatially-averaged trajectory for Neural ODE training.
 
@@ -317,7 +317,7 @@ def generate_initial_conditions(grid, seed=None):
     return S, R, I, C
 
 
-def generate_neural_ode_dataset(n_trajectories=50, T=6.0, N_grid=64, verbose=True):
+def generate_neural_ode_dataset(n_trajectories=50, T=10.0, N_grid=64, verbose=True):
     """
     Generate complete Neural ODE dataset with varied parameters and initial conditions.
 
@@ -1218,7 +1218,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
             print(f"Suffix: {args.suffix}")
         print("="*60)
 
-        dataset = generate_neural_ode_dataset(n_trajectories=50, T=6.0, N_grid=64)
+        dataset = generate_neural_ode_dataset(n_trajectories=50, T=10.0, N_grid=64)
         save_dataset(dataset, train_frac=0.8, val_frac=0.1, suffix=args.suffix)
 
         # Visualize sample trajectories
