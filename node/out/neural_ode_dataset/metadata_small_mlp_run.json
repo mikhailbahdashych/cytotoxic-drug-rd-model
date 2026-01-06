@@ -1,8 +1,8 @@
 {
-  "n_total": 50,
-  "n_train": 40,
-  "n_val": 5,
-  "n_test": 5,
+  "n_total": 200,
+  "n_train": 160,
+  "n_val": 20,
+  "n_test": 20,
   "split": {
     "train": 0.8,
     "val": 0.1,
