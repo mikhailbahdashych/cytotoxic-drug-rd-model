@@ -317,13 +317,13 @@ def generate_initial_conditions(grid, seed=None):
     return S, R, I, C
 
 
-def generate_neural_ode_dataset(n_trajectories=50, T=10.0, N_grid=64, verbose=True):
+def generate_neural_ode_dataset(n_trajectories=200, T=6.0, N_grid=64, verbose=True):
     """
     Generate complete Neural ODE dataset with varied parameters and initial conditions.
 
     Args:
-        n_trajectories: Number of trajectories to generate
-        T: Time horizon
+        n_trajectories: Number of trajectories to generate (default: 200)
+        T: Time horizon (default: 6.0 - shorter to improve interpolation accuracy)
         N_grid: Grid resolution (NxN)
         verbose: Print progress
 
@@ -498,20 +498,18 @@ def load_dataset_splits(noise_level=0.0, suffix=""):
 # %%
 class SmallMLP_NODE(nn.Module):
     """
-    Small MLP Neural ODE architecture with POSITIVITY CONSTRAINTS (Stage 1 Fix).
+    Small MLP Neural ODE architecture.
 
     - 2 hidden layers
     - 32 neurons per layer
     - Tanh activation
     - Direct time encoding
-    - POSITIVITY CONSTRAINTS to prevent negative states
     - ~1,300 parameters
     """
-    def __init__(self, state_dim=4, hidden_dim=32, use_positivity_constraint=True):
+    def __init__(self, state_dim=4, hidden_dim=32):
         super().__init__()
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
-        self.use_positivity_constraint = use_positivity_constraint
 
         self.net = nn.Sequential(
             nn.Linear(state_dim + 1, hidden_dim),  # +1 for time
@@ -523,17 +521,14 @@ class SmallMLP_NODE(nn.Module):
 
     def forward(self, t, x):
         """
-        Forward pass: compute dx/dt = f(x, t) with positivity constraints.
-
-        The key insight: if x is near zero and dx/dt < 0, we dampen the derivative
-        to prevent x from going negative during integration.
+        Forward pass: compute dx/dt = f(x, t).
 
         Args:
             t: Time (scalar or tensor)
             x: State [batch_size, state_dim]
 
         Returns:
-            dx/dt: [batch_size, state_dim] with positivity constraints
+            dx/dt: [batch_size, state_dim]
         """
         # Ensure t is a scalar tensor
         if isinstance(t, (int, float)):
@@ -543,42 +538,26 @@ class SmallMLP_NODE(nn.Module):
         t_vec = t * torch.ones(x.shape[0], 1, device=x.device, dtype=x.dtype)
         x_with_t = torch.cat([x, t_vec], dim=1)
 
-        # Compute raw derivative
+        # Compute derivative
         dx_dt = self.net(x_with_t)
-
-        if self.use_positivity_constraint:
-            # Apply positivity constraint: if x is small and dx/dt < 0, dampen it
-            # This prevents x from going negative during ODE integration
-            threshold = 0.01  # Below this, apply dampening
-            mask_small = x < threshold
-            mask_negative_deriv = dx_dt < 0
-            mask_apply = mask_small & mask_negative_deriv
-
-            # Dampening factor: prevents states from going negative
-            dampening_factor = nn.functional.softplus(x) / threshold
-            dampening_factor = torch.clamp(dampening_factor, max=1.0)
-
-            dx_dt = torch.where(mask_apply, dx_dt * dampening_factor, dx_dt)
 
         return dx_dt
 
 
 class LargeMLP_NODE(nn.Module):
     """
-    Large MLP Neural ODE architecture with Fourier time encoding and POSITIVITY CONSTRAINTS (Stage 1 Fix).
+    Large MLP Neural ODE architecture with Fourier time encoding.
 
     - 4 hidden layers (128 → 128 → 128 → 64)
     - Tanh activation
     - Fourier time encoding: [sin(ωt), cos(ωt)] where ω = 2π/5 (dosing period)
-    - POSITIVITY CONSTRAINTS to prevent negative states
     - ~33,000 parameters
     """
-    def __init__(self, state_dim=4, hidden_dim=128, dosing_period=5.0, use_positivity_constraint=True):
+    def __init__(self, state_dim=4, hidden_dim=128, dosing_period=5.0):
         super().__init__()
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
         self.omega = 2 * np.pi / dosing_period  # Angular frequency for Fourier encoding
-        self.use_positivity_constraint = use_positivity_constraint
 
         self.net = nn.Sequential(
             nn.Linear(state_dim + 2, hidden_dim),  # +2 for sin/cos
@@ -594,14 +573,14 @@ class LargeMLP_NODE(nn.Module):
 
     def forward(self, t, x):
         """
-        Forward pass with Fourier time encoding and positivity constraints.
+        Forward pass with Fourier time encoding.
 
         Args:
             t: Time (scalar or tensor)
             x: State [batch_size, state_dim]
 
         Returns:
-            dx/dt: [batch_size, state_dim] with positivity constraints
+            dx/dt: [batch_size, state_dim]
         """
         # Ensure t is a scalar tensor
         if isinstance(t, (int, float)):
@@ -615,20 +594,8 @@ class LargeMLP_NODE(nn.Module):
         # Concatenate state with Fourier features
         x_with_t = torch.cat([x, t_sin, t_cos], dim=1)
 
-        # Compute raw derivative
+        # Compute derivative
         dx_dt = self.net(x_with_t)
-
-        if self.use_positivity_constraint:
-            # Apply positivity constraint (same as SmallMLP)
-            threshold = 0.01
-            mask_small = x < threshold
-            mask_negative_deriv = dx_dt < 0
-            mask_apply = mask_small & mask_negative_deriv
-
-            dampening_factor = nn.functional.softplus(x) / threshold
-            dampening_factor = torch.clamp(dampening_factor, max=1.0)
-
-            dx_dt = torch.where(mask_apply, dx_dt * dampening_factor, dx_dt)
 
         return dx_dt
 
@@ -676,78 +643,54 @@ def ode_solve(model, x0, t, method='rk4'):
 
 def compute_loss(model, x0_batch, t_batch, x_true_batch, loss_weights=None):
     """
-    Compute multi-component loss with PER-VARIABLE WEIGHTING (Stage 1 Fix).
-
-    Changes from original:
-    - Added per-variable weighting to give equal importance to S, R, I, C
-    - Increased physics loss weight to strongly enforce positivity
-    - Added separate monitoring of each state variable error
+    Compute multi-component loss for Neural ODE training.
 
     Loss components:
-    1. Per-variable trajectory loss: separate weights for S, R, I, C
-    2. Endpoint loss: emphasize final state accuracy
-    3. Physics loss: enforce non-negativity (heavily weighted)
+    1. Trajectory loss: MSE over all timepoints
+    2. Endpoint loss: MSE at final time
+    3. Physics loss: soft constraint for non-negativity
 
     Args:
         model: Neural ODE model
         x0_batch: Initial states [batch_size, state_dim]
         t_batch: Time points [n_timepoints]
         x_true_batch: True trajectories [batch_size, n_timepoints, state_dim]
-        loss_weights: Dict with per-variable weights
+        loss_weights: Dict with loss weights (optional)
 
     Returns:
         total_loss, loss_dict
     """
     if loss_weights is None:
-        # Default: per-variable weights (Stage 1 Fix)
         loss_weights = {
-            'weight_S': 1.2,    # Sensitive cells
-            'weight_R': 1.0,    # Resistant cells
-            'weight_I': 1.5,    # Immune cells (higher - most problematic)
-            'weight_C': 2.0,    # Drug concentration (highest - massive error)
+            'weight_traj': 1.0,
             'weight_endpoint': 5.0,
-            'weight_physics': 10.0,  # 100x original - strong positivity enforcement
+            'weight_physics': 0.1
         }
 
     # Forward pass: integrate ODE
     x_pred = ode_solve(model, x0_batch, t_batch, method='rk4')
     x_pred = x_pred.permute(1, 0, 2)  # [batch, time, state]
 
-    # Per-variable trajectory loss
-    loss_S = torch.mean((x_pred[:, :, 0] - x_true_batch[:, :, 0]) ** 2)
-    loss_R = torch.mean((x_pred[:, :, 1] - x_true_batch[:, :, 1]) ** 2)
-    loss_I = torch.mean((x_pred[:, :, 2] - x_true_batch[:, :, 2]) ** 2)
-    loss_C = torch.mean((x_pred[:, :, 3] - x_true_batch[:, :, 3]) ** 2)
+    # Trajectory loss: MSE over all states and timepoints
+    loss_traj = torch.mean((x_pred - x_true_batch) ** 2)
 
-    # Weighted trajectory loss
-    loss_traj = (
-        loss_weights['weight_S'] * loss_S +
-        loss_weights['weight_R'] * loss_R +
-        loss_weights['weight_I'] * loss_I +
-        loss_weights['weight_C'] * loss_C
-    )
-
-    # Endpoint loss: emphasize final state
+    # Endpoint loss: emphasize final state accuracy
     loss_end = torch.mean((x_pred[:, -1, :] - x_true_batch[:, -1, :]) ** 2)
 
-    # Physics loss: enforce non-negativity (CRITICAL)
+    # Physics loss: soft constraint for non-negativity
     loss_phys = torch.mean(torch.relu(-x_pred) ** 2)
 
     # Total loss
     total_loss = (
-        loss_traj +  # Already weighted internally
+        loss_weights['weight_traj'] * loss_traj +
         loss_weights['weight_endpoint'] * loss_end +
         loss_weights['weight_physics'] * loss_phys
     )
 
-    # Detailed loss dictionary for monitoring
+    # Loss dictionary for monitoring
     loss_dict = {
         'total': total_loss.item(),
         'trajectory': loss_traj.item(),
-        'S': loss_S.item(),
-        'R': loss_R.item(),
-        'I': loss_I.item(),
-        'C': loss_C.item(),
         'endpoint': loss_end.item(),
         'physics': loss_phys.item()
     }
@@ -764,7 +707,7 @@ def train_neural_ode(
     weight_decay=1e-5,
     device='cpu',
     save_path=None,
-    early_stopping_patience=500  # Stage 1 Fix: Disabled early stopping (set to num_epochs)
+    early_stopping_patience=50
 ):
     """
     Train Neural ODE model.
@@ -1180,7 +1123,7 @@ def plot_extrapolation_test(model, test_dataset, device='cpu', save_path=None, s
     x0 = x0.unsqueeze(0).to(device)
     t_train = t_train.to(device)
 
-    # Extend time to t=8 (training was t=6)
+    # Extend time to t=8 (training is now t=6)
     t_extended = torch.linspace(0, 8.0, 800).to(device)
 
     with torch.no_grad():
@@ -1289,7 +1232,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
             print(f"Suffix: {args.suffix}")
         print("="*60)
 
-        dataset = generate_neural_ode_dataset(n_trajectories=50, T=10.0, N_grid=64)
+        dataset = generate_neural_ode_dataset(n_trajectories=200, T=6.0, N_grid=64)
         save_dataset(dataset, train_frac=0.8, val_frac=0.1, suffix=args.suffix)
 
         # Visualize sample trajectories
@@ -1496,7 +1439,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 # ```
 
 # %%
-# run_node(mode='train', model='small_mlp', epochs=500, batch_size=128, lr=1e-3, suffix='small_mlp_run')
+# run_node(mode='train', model='small_mlp', epochs=500, batch_size=256, lr=1e-3, suffix='small_mlp_run')
 # run_node(mode='train', model='large_mlp', epochs=1500, batch_size=256, lr=1e-3, suffix='large_mlp_run')
 
 # %% [markdown]
@@ -1508,7 +1451,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 # ```
 
 # %%
-# run_node(mode='evaluate', model='small_mlp', suffix='small_mlp_run')
+run_node(mode='evaluate', model='small_mlp', suffix='small_mlp_run')
 # run_node(mode='evaluate', model='large_mlp', suffix='large_mlp_run')
 
 # %% [markdown]
@@ -1519,7 +1462,7 @@ def run_node(mode=None, model='small_mlp', epochs=500, batch_size=8, lr=1e-3, ts
 # ```
 
 # %%
-# run_node(mode='visualize', suffix='small_mlp_run')
+run_node(mode='visualize', suffix='small_mlp_run')
 # run_node(mode='visualize', suffix='large_mlp_run')
 
 # %% [markdown]
