@@ -1,0 +1,126 @@
+{
+  "parameters": {
+    "rho_S": 0.04,
+    "rho_R": 0.03,
+    "K": 1.0,
+    "alpha_S": 0.8,
+    "alpha_R": 0.1,
+    "lam": 0.5,
+    "gamma_S": 0.05,
+    "gamma_R": 0.03,
+    "sigma": 0.02,
+    "delta": 0.1,
+    "mu_max": 0.02,
+    "C_50": 0.3,
+    "m": 2.0,
+    "dose_amount": 0.5,
+    "dose_interval": 10.0,
+    "dose_duration": 1.0
+  },
+  "initial_conditions": [
+    0.1,
+    0.01,
+    0.01,
+    0.0
+  ],
+  "train_test_split": {
+    "n_train": 250,
+    "n_test": 251,
+    "t_split": 49.800000000000004
+  },
+  "supermodel": {
+    "architecture": {
+      "hidden_dim": 64,
+      "n_layers": 2,
+      "n_parameters": 4804
+    },
+    "training": {
+      "epochs": 500,
+      "best_loss": 8.34234288049629e-06
+    },
+    "metrics": {
+      "train_RMSE": 0.046279523025417,
+      "test_RMSE": 0.14822778373021345
+    }
+  },
+  "supernet": {
+    "architecture": {
+      "hidden_dim": 64,
+      "n_layers": 3,
+      "n_parameters": 8708
+    },
+    "training": {
+      "epochs": 1000,
+      "best_loss": 0.004189156461507082,
+      "loss_weights": {
+        "data": 1.0,
+        "physics": 0.1,
+        "ic": 10.0
+      }
+    },
+    "metrics": {
+      "train_RMSE": 0.059021459353857594,
+      "test_RMSE": 0.06072152185087455
+    }
+  },
+  "baseline_ode": {
+    "train_RMSE": 0.0,
+    "test_RMSE": 0.0
+  },
+  "all_metrics": {
+    "ODE_train_S_RMSE": 0.0,
+    "ODE_train_S_MAE": 0.0,
+    "ODE_train_R_RMSE": 0.0,
+    "ODE_train_R_MAE": 0.0,
+    "ODE_train_I_RMSE": 0.0,
+    "ODE_train_I_MAE": 0.0,
+    "ODE_train_C_RMSE": 0.0,
+    "ODE_train_C_MAE": 0.0,
+    "ODE_train_total_RMSE": 0.0,
+    "ODE_test_S_RMSE": 0.0,
+    "ODE_test_S_MAE": 0.0,
+    "ODE_test_R_RMSE": 0.0,
+    "ODE_test_R_MAE": 0.0,
+    "ODE_test_I_RMSE": 0.0,
+    "ODE_test_I_MAE": 0.0,
+    "ODE_test_C_RMSE": 0.0,
+    "ODE_test_C_MAE": 0.0,
+    "ODE_test_total_RMSE": 0.0,
+    "Supermodel_train_S_RMSE": 0.015317461523810489,
+    "Supermodel_train_S_MAE": 0.01403934156975543,
+    "Supermodel_train_R_RMSE": 0.0896903279648742,
+    "Supermodel_train_R_MAE": 0.07473724583400304,
+    "Supermodel_train_I_RMSE": 0.01614075501398314,
+    "Supermodel_train_I_MAE": 0.01376349439666659,
+    "Supermodel_train_C_RMSE": 0.0052605584721472235,
+    "Supermodel_train_C_MAE": 0.0031159708523923334,
+    "Supermodel_train_total_RMSE": 0.046279523025417,
+    "Supermodel_test_S_RMSE": 0.004027991406097042,
+    "Supermodel_test_S_MAE": 0.0033763111555649692,
+    "Supermodel_test_R_RMSE": 0.2909238320826287,
+    "Supermodel_test_R_MAE": 0.2838406336916638,
+    "Supermodel_test_I_RMSE": 0.056550274494330324,
+    "Supermodel_test_I_MAE": 0.05489573579151801,
+    "Supermodel_test_C_RMSE": 0.00592192067580352,
+    "Supermodel_test_C_MAE": 0.003512655900005031,
+    "Supermodel_test_total_RMSE": 0.14822778373021345,
+    "SuperNet_train_S_RMSE": 0.009578339350601128,
+    "SuperNet_train_S_MAE": 0.007145148029380791,
+    "SuperNet_train_R_RMSE": 0.002119763329839601,
+    "SuperNet_train_R_MAE": 0.001496566234962775,
+    "SuperNet_train_I_RMSE": 0.0006532555669207623,
+    "SuperNet_train_I_MAE": 0.0005915825372690276,
+    "SuperNet_train_C_RMSE": 0.11763275875754482,
+    "SuperNet_train_C_MAE": 0.08989431892332231,
+    "SuperNet_train_total_RMSE": 0.059021459353857594,
+    "SuperNet_test_S_RMSE": 0.004555931626080894,
+    "SuperNet_test_S_MAE": 0.004420312196876907,
+    "SuperNet_test_R_RMSE": 0.03354133715194278,
+    "SuperNet_test_R_MAE": 0.029672417685448392,
+    "SuperNet_test_I_RMSE": 0.006038292216409451,
+    "SuperNet_test_I_MAE": 0.005312544377631015,
+    "SuperNet_test_C_RMSE": 0.11647392016984906,
+    "SuperNet_test_C_MAE": 0.07975713510236843,
+    "SuperNet_test_total_RMSE": 0.06072152185087455
+  }
+}
